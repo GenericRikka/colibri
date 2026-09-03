@@ -101,8 +101,9 @@ allowlist, :3379), consulted by both gate sites — `attention_rows` (:3448) and
 `layer_forward_rows` (:5792) — and by the load-time notice
 `metal_fmt_gate_notice` (:1866, called from `model_init`).
 
-Sources for all rows (`c/quant.h`/`c/colibri.c` line numbers at this PR
-pair's current restack, base dev `292ed4c`):
+Sources for all rows (`c/quant.h`/`c/colibri.c` line numbers verified at
+this branch's own head -- originally written against base dev `292ed4c`,
+re-anchored here because line numbers rot with the file, not the base):
 
 - **fmt=0/1/2/3** — allocation policy: `qt_alloc`, `c/colibri.c`
   (`bits>=16→fmt=0`, `bits>=5→fmt=1`, `bits>=4→fmt=2`, else `fmt=3`).

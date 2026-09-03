@@ -498,12 +498,17 @@ TEST_RULES  := $(shell sed -n 's|^tests/\(test_[a-z0-9_]*\)\$$(EXE):.*|\1|p' $(f
 # "unsupported option '-msse4.1' for target arm64-...".
 # Appended back below only on x86-64 hosts, alongside the other conditional
 # platform tests already handled the same way.
+# test_e8x4g64_loader takes a minted container directory on argv and prints its
+# usage (exit 2) without one, so it is a harness rather than a gate: it has a
+# rule here so it compiles under the suite's own $(CFLAGS) and its warnings are
+# caught, and tests/test_e8x4g64_mint_load.py is what actually drives it.
 # test_qwen38_tier_engine drives qwen38.c over the generated FP8 fixture
 # (qwen38_tiny_fp8, gitignored); it runs from qwen38-tier-engine-check.
 TEST_EXCLUDE = test_uring test_deepseek_v4 test_v4_ownership test_v4_serve_framing \
 	test_segment_adapters_registration test_segment_adapters_real \
 	test_edge_adapters_registration test_edge_adapters_real \
-	test_gsgemv_sse41 test_qgemv_sse41 test_olmoe_dot_i8_16_sse41 test_qwen38_tier_engine
+	test_gsgemv_sse41 test_qgemv_sse41 test_olmoe_dot_i8_16_sse41 test_qwen38_tier_engine \
+	test_e8x4g64_loader
 TEST_BINS    = $(addprefix tests/,$(addsuffix $(EXE),$(filter-out $(TEST_EXCLUDE),$(TEST_RULES))))
 ifneq (,$(LINUX))
 TEST_BINS += tests/test_uring$(EXE)
@@ -2095,6 +2100,14 @@ tests/test_olmoe_dot_i8_16_sse41$(EXE): tests/test_olmoe_dot_i8_16.c olmoe.c sse
 # real guard -- no GPU needed, every probed path returns before any device context.
 tests/test_shard_kvb_refuse$(EXE): tests/test_shard_kvb_refuse.c colibri.c st.h uring.h json.h tok.h tok_unicode.h compat.h grammar.h tier.h quant.h fp8_format.h sample.h kv_persist.h telemetry.h $(CUDA_OBJ)
 	$(CC) $(CFLAGS) $< $(CUDA_OBJ) -o $@ $(LDFLAGS)
+
+# The e8x4g64 container loader harness. It takes a minted directory on argv and
+# is driven by tests/test_e8x4g64_mint_load.py, which builds it too -- this rule
+# exists so it also compiles under the suite's own $(CFLAGS) rather than only
+# under the driver's hand-copied flag list, and so a warning regression in it
+# fails the normal build.
+tests/test_e8x4g64_loader$(EXE): tests/test_e8x4g64_loader.c st.h quant.h fp8_format.h compat.h
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
 test-c: $(TEST_BINS)
 	$(PYTHON) tools/run_tests.py $(TEST_BINS)
