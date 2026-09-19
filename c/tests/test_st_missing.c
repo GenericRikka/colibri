@@ -82,6 +82,26 @@ int main(void) {
     /* and a present tensor still reads fine with the index around */
     { shards S; memset(&S, 0, sizeof S); st_init(&S, D); float v[8]; CHECK(st_read_f32(&S, "a", v, 0) == 8); st_destroy(&S); }
     wipe(D);
+
+    /* 5. an index path that does not fit the buffer is refused, not opened truncated:
+     * with a 1193-char directory, "<dir>/model" is all snprintf would keep of the name */
+    {
+        char dir[1200] = "tmp_st_long", p[1300]; size_t n = strlen(dir);
+        CHECK(mkdir(dir, 0755) == 0);
+        while (n < 1193) {
+            size_t k = 1193 - n - 1 > 200 ? 200 : 1193 - n - 1;
+            dir[n++] = '/'; memset(dir + n, 'd', k); n += k; dir[n] = 0;
+            CHECK(mkdir(dir, 0755) == 0);
+        }
+        snprintf(p, sizeof p, "%s/model", dir);
+        FILE *f = fopen(p, "wb"); CHECK(f != NULL); fputs("{\"weight_map\":{\"a\":\"x\"}}", f); fclose(f);
+        st_index ix; memset(&ix, 0, sizeof ix); st_index_load(&ix, dir);
+        int refused = ix.root == NULL && ix.map == NULL;
+        remove(p);
+        for (char *s; (s = strrchr(dir, '/')) != NULL; *s = 0) rmdir(dir);
+        rmdir(dir);
+        CHECK(refused);
+    }
     puts("st_die_missing diagnosis tests: ok");
     return 0;
 }

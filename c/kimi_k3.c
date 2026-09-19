@@ -188,7 +188,9 @@ typedef struct {
 
 /* ---------- routed-expert streaming (native MXFP4 from the HF shards) ---- */
 typedef struct { int fd[6]; int64_t off[6]; int contig; } ERef;  /* w1p w1s w2p w2s w3p w3s */
+#ifndef KIMI_K3_NO_MAIN
 static char g_k3_usage[2100];   /* <snap>/.coli_usage, or COLI_USAGE */
+#endif
 typedef struct { int eid; uint8_t *buf, *base; uint64_t used; int pinned; } Slot;
 /* pinned: seeded from .coli_usage at startup and never evicted. The LRU adapts to
  * THIS session; the pin knows the history of every session before it. Capped at

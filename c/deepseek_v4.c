@@ -1350,7 +1350,7 @@ static int build_runtime_plan(ColiV4Engine *engine,
     uint64_t maximum_layer = 0, dense_total = 0;
     for (int layer = 0; layer < config->num_hidden_layers; layer++) {
         ColiDeepSeekV4LayerPlan layer_plan;
-        ColiDeepSeekV4LayerStats stats;
+        ColiDeepSeekV4LayerStats stats = {0};
         if (coli_v4_layer_plan(&layer_plan, config, layer,
                                error, error_size) ||
             coli_v4_layer_validate(&layer_plan, index, &stats,
