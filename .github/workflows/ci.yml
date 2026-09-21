@@ -843,7 +843,9 @@ jobs:
           # the oracle fixture has no tokenizer; serve mode needs one
           python3 tools/make_edge_tiny_tokenizer.py --vocab-size "$(python3 -c 'import json;print(json.load(open("qwen38_tiny/config.json"))["vocab_size"])')" qwen38_tiny
           make qwen38 >/dev/null
-          QWEN38_TINY=qwen38_tiny python3 -m unittest -v tests.test_qwen38_dashboard
+          QWEN38_TINY=qwen38_tiny python3 -m unittest -v tests.test_qwen38_dashboard tests.test_qwen38_brio
+          python3 tools/make_edge_tiny_tokenizer.py --vocab-size 64 qwen38_tiny_fp8
+          QWEN38_TINY=qwen38_tiny_fp8 python3 -m unittest -v tests.test_qwen38_brio
 
   inkling-oracle:
     name: Inkling oracle (token-exact vs transformers)
