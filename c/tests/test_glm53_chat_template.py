@@ -187,36 +187,47 @@ def main() -> int:
     # rifiutata a monte (tests/test_openai_server.py, TrailingAssistantTurnTest).
     aperto = [{"role": "user", "content": "capitale della Francia?"},
                {"role": "assistant", "content": "La capitale e'"}]
-    produced = openai_server.render_chat_for_arch(aperto, enable_thinking=True,
-                                                  add_generation_prompt=False)
-    expected = reference(template_text, messages=aperto, add_generation_prompt=False)
-    if produced != expected:
-        print("FAIL prosecuzione: il turno aperto non rende come il template con "
-              "add_generation_prompt=False")
-        for position, (left, right) in enumerate(zip(produced, expected)):
-            if left != right:
-                start = max(0, position - 40)
-                print(f"  primo scostamento a {position}")
-                print(f"  gateway:  ...{produced[start:position + 40]!r}")
-                print(f"  template: ...{expected[start:position + 40]!r}")
-                break
-        else:
-            print(f"  lunghezze diverse: {len(produced)} contro {len(expected)}")
-        return 1
-    if produced.endswith("<|assistant|><think>"):
-        print("FAIL prosecuzione: il prompt finisce su un nuovo turno invece di proseguire "
-              "quello del client")
-        return 1
-    if not produced.endswith("La capitale e'"):
-        print(f"FAIL prosecuzione: il prompt non finisce sull'apertura del client: "
-              f"{produced[-60:]!r}")
-        return 1
-    # Controllo negativo: col ramo True lo stesso scambio DEVE finire sulla cue, o il
-    # confronto qui sopra non starebbe distinguendo niente.
-    if not openai_server.render_chat_for_arch(
-            aperto, enable_thinking=True).endswith("<|assistant|><think>"):
-        print("FAIL prosecuzione: il ramo normale non emette piu' il prompt di generazione")
-        return 1
+    # L'effort esce ESPLICITO su entrambi i lati, e su ognuno dei tre livelli che il
+    # template sa esprimere: 'low' e 'high' passano invariati, 'xhigh' rende Max come il
+    # default del template. 'minimal'/'medium' non sono qui apposta -- il gateway li
+    # riduce a Low/High (la sua scala e' piu' ricca del template), quindi contro il
+    # riferimento non c'e' niente da confrontare. Passare l'effort esplicito toglie di
+    # mezzo la differenza sul default (gateway High, template Max), che non e' una
+    # questione di prosecuzione: e' la scala dei livelli, e vale identica sul ramo True.
+    for effort in ("low", "high", "xhigh"):
+        produced = openai_server.render_chat_for_arch(
+            aperto, enable_thinking=True, reasoning_effort=effort, add_generation_prompt=False)
+        expected = reference(template_text, messages=aperto, reasoning_effort=effort,
+                             add_generation_prompt=False)
+        if produced != expected:
+            print(f"FAIL prosecuzione (reasoning_effort={effort!r}): il turno aperto non "
+                  f"rende come il template con add_generation_prompt=False")
+            for position, (left, right) in enumerate(zip(produced, expected)):
+                if left != right:
+                    start = max(0, position - 40)
+                    print(f"  primo scostamento a {position}")
+                    print(f"  gateway:  ...{produced[start:position + 40]!r}")
+                    print(f"  template: ...{expected[start:position + 40]!r}")
+                    break
+            else:
+                print(f"  lunghezze diverse: {len(produced)} contro {len(expected)}")
+            return 1
+        if produced.endswith("<|assistant|><think>"):
+            print(f"FAIL prosecuzione (reasoning_effort={effort!r}): il prompt finisce su un "
+                  f"nuovo turno invece di proseguire quello del client")
+            return 1
+        if not produced.endswith("La capitale e'"):
+            print(f"FAIL prosecuzione (reasoning_effort={effort!r}): il prompt non finisce "
+                  f"sull'apertura del client: {produced[-60:]!r}")
+            return 1
+        # Controllo negativo: col ramo True lo stesso scambio DEVE finire sulla cue, o il
+        # confronto qui sopra non starebbe distinguendo niente.
+        if not openai_server.render_chat_for_arch(
+                aperto, enable_thinking=True,
+                reasoning_effort=effort).endswith("<|assistant|><think>"):
+            print(f"FAIL prosecuzione (reasoning_effort={effort!r}): il ramo normale non "
+                  f"emette piu' il prompt di generazione")
+            return 1
     checked += 1
 
     print(f"PASS GLM-5.3 chat template: {checked} rese identiche a "
