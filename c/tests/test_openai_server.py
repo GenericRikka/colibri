@@ -25,7 +25,8 @@ from openai_server import (APIError, APIHandler, APIServer, ClientCancelled,
                            read_engine_turn, render_chat, render_chat_for_arch,
                            render_chat_glm53, render_chat_inkling, render_chat_kimi,
                            render_chat_olmoe,
-                           render_chat_qwen38, render_chat_v4, _dsv4_tool_calls, serve,
+                           render_chat_qwen38, render_chat_v4, render_chat_dsv41,
+                           _dsv4_tool_calls, serve,
                            resolve_generation_prompt, split_thinking_reply,
                            starts_in_reasoning,
                            stop_policy, tune_child_env)
@@ -2179,6 +2180,42 @@ class TrailingAssistantTurnTest(unittest.TestCase):
                 cont = render_chat_for_arch(self.OPEN_TURN, enable_thinking=enable_thinking,
                                             add_generation_prompt=False)
             self.assertEqual(cont, EXPECTED_OPEN)
+            # and the invariant tying it to the normal render: past turn without its EOS + cue
+            self.assertEqual(normal, cont + EOS + cue)
+            self.assertTrue(cont.endswith("La capitale e'"), cont[-40:])
+            self.assertFalse(cont.endswith(EOS))
+
+    def test_continuation_open_turn_deepseek_v41(self):
+        """deepseek_v41, like deepseek_v4, is pinned to encoding.py rather than a diffable
+        vendored jinja template, so it gets the same expected-string pin: the open turn is a
+        literal here, with the past-turn-minus-EOS invariant kept as an added check, in both
+        thinking modes.
+
+        Unlike v4, the v41 open turn is NOT identical across the modes: thinking-on carries the
+        <｜System｜> Reasoning Effort line and closes the continued turn's (empty) reasoning as
+        <think></think>; thinking-off has neither. The empty <think></think> is the SAFE
+        position #1327 is about, not the out-of-distribution one -- it is followed by the
+        client's content ('La capitale e''), never left dangling at the end of the prompt,
+        which resolve_generation_prompt guarantees by refusing an empty continuation."""
+        EOS = "<｜end▁of▁sentence｜>"
+        ASSISTANT = "<｜Assistant｜>"
+        EFFORT = ("<｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the "
+                  "more thorough the reasoning)\n\n")
+        # The literal open turns, written out so the test does not lean on another renderer
+        # call for its only expected value (see the deepseek_v4 test), one per thinking mode.
+        EXPECTED_OPEN = {
+            True: ("<｜begin▁of▁sentence｜>" + EFFORT + "<｜User｜>capitale della Francia?"
+                   "<｜Assistant｜><think></think>La capitale e'"),
+            False: ("<｜begin▁of▁sentence｜><｜User｜>capitale della Francia?"
+                    "<｜Assistant｜></think>La capitale e'"),
+        }
+        for enable_thinking in (True, False):
+            cue = ASSISTANT + ("<think>" if enable_thinking else "</think>")
+            with patch("openai_server.ARCH", "deepseek_v41"):
+                normal = render_chat_dsv41(self.OPEN_TURN, enable_thinking=enable_thinking)
+                cont = render_chat_for_arch(self.OPEN_TURN, enable_thinking=enable_thinking,
+                                            add_generation_prompt=False)
+            self.assertEqual(cont, EXPECTED_OPEN[enable_thinking])
             # and the invariant tying it to the normal render: past turn without its EOS + cue
             self.assertEqual(normal, cont + EOS + cue)
             self.assertTrue(cont.endswith("La capitale e'"), cont[-40:])

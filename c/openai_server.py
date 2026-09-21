@@ -2311,13 +2311,18 @@ def _dsv41_merge_turns(messages):
 
 
 def render_chat_dsv41(messages, enable_thinking=False, reasoning_effort=None, tools=None,
-                      tool_choice=None):
+                      tool_choice=None, add_generation_prompt=True):
     """encoding.py _encode_messages_text for one turn.
 
     Tool use follows the checkpoint's own DSML format (encoding/encoding.py, vendored in
     v41_dsml.py): schemas are declared at the end of the system message, assistant tool
     calls are <｜DSML｜ calls> blocks, and tool results are <tool_result> blocks merged
     into the following user turn.
+
+    add_generation_prompt=False continues a trailing assistant turn: the last turn is rendered
+    open -- its <think></think> block and content as a PAST turn, but without the closing
+    <｜end▁of▁sentence｜> and with no cue appended. That is the same drop-the-terminator move as
+    deepseek_v4, whose EOS this shares; the model resumes from the content it was handed.
     """
     if not isinstance(messages, list) or not messages:
         raise APIError(400, "`messages` must be a non-empty array.", "messages")
@@ -2377,10 +2382,13 @@ def render_chat_dsv41(messages, enable_thinking=False, reasoning_effort=None, to
             prompt.append(turn["content"])
             if turn.get("tool_calls"):
                 prompt.append(v41_dsml.render_tool_calls(turn["tool_calls"]))
-            prompt.append(DSV41_EOS)
+            # A continued turn is the last message rendered open: no EOS, no cue below.
+            if add_generation_prompt or index != len(turns) - 1:
+                prompt.append(DSV41_EOS)
     # the generation cue, exactly as render_message appends it after a user turn
-    prompt.append(DSV41_ASSISTANT)
-    prompt.append("<think>" if enable_thinking and len(turns) - 1 >= last_user else "</think>")
+    if add_generation_prompt:
+        prompt.append(DSV41_ASSISTANT)
+        prompt.append("<think>" if enable_thinking and len(turns) - 1 >= last_user else "</think>")
     return "".join(prompt)
 
 
@@ -2413,7 +2421,7 @@ def render_chat_dsv41(messages, enable_thinking=False, reasoning_effort=None, to
 # on by default, and a family without its open-turn shape yet must not start rejecting requests
 # nobody opted into. Each renderer adds itself here in the same commit that derives its shape.
 CONTINUATION_FAMILIES = {"glm53", "qwen38", "qwen36", "glm", "olmoe", "deepseek_v4", "inkling",
-                         "kimi"}
+                         "kimi", "deepseek_v41"}
 
 
 def resolve_generation_prompt(messages, body):
@@ -2522,7 +2530,8 @@ def render_chat_for_arch(messages, enable_thinking=False, reasoning_effort=None,
         return render_chat_kimi(messages, enable_thinking, reasoning_effort, tools,
                                 tool_choice, add_generation_prompt=add_generation_prompt)
     if ARCH == "deepseek_v41":
-        return render_chat_dsv41(messages, enable_thinking, reasoning_effort, tools, tool_choice)
+        return render_chat_dsv41(messages, enable_thinking, reasoning_effort, tools,
+                                 tool_choice, add_generation_prompt)
     return render_chat(messages, enable_thinking, reasoning_effort, tools, tool_choice)
 
 
