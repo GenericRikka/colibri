@@ -66,6 +66,21 @@ is now measured on the card in front of it instead of predicted.
   output. A hand-written `COLI_PLACE` stands; `COLI_TRUNK_PROBE=0` trusts
   the placer.
 
+### Performance
+
+- **#PR**: qwen36's dense trunk and routed experts multiply with integer
+  dot products. The activation is quantized to int8 once per call and the
+  weights, int8 rows or int4 planar blocks, meet it with maddubs / vpdpbusd
+  instead of a float conversion per weight; the integer kernels move from
+  `quant.h` into `idot.h`, shared by every engine. Measured on the 35B, 8
+  threads, every expert resident: decode 6.71 to 8.23 tok/s (+22.6%), lm_head
+  12.6 to 10.1 ms/token, the expert compute 22.7 to 15.6, for +1.3%
+  perplexity on 4 x 512 tokens. Both are the default (`COLI_DENSE_IDOT=0`,
+  `QWEN_EXPERT_ACT=f32` restore the f32 kernels). `COLI_DENSE_BITS=4` with
+  `COLI_DENSE_INT4=<components>` stores part of the trunk as int4 in blocks
+  of 64: opt-in, with the perplexity it costs per component in the docs
+  (lm_head alone +2.4%, everything +10%).
+
 ### Performance, from contributors
 
 - **#1606**: the K1b grouped int4 family gets a multi-row tile and AVX-512

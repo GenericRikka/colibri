@@ -67,6 +67,7 @@ static int qwen36_max_ctx(void) {
 #include "json.h"   /* tokenizer.json parsing (reuse minimal parser) */
 #include "qwen36_tier.h"   /* optional CUDA VRAM expert tier */
 #include "expert_ffn.h"    /* routed experts: planar int4 kernel + layer runner */
+#include "idot.h"          /* integer dot kernels for the dense trunk (COLI_DENSE_IDOT, COLI_DENSE_BITS) */
 #ifdef COLI_SEGMENT_ADAPTER
 #include "segment_runtime.h"
 #include "segment_adapters.h"
@@ -989,6 +990,12 @@ static int g_expert_is_int4 = 1;
  * int8 copy) and with QWEN_EXPERT_KERNEL=0, which keeps the historical
  * unpack-to-int8 path for A/Bs. Decided once from the container itself. */
 static int container_layer_is_int4(Model *m, int layer);
+/* The routed experts take the same integer path as the dense trunk
+ * (expert_ffn.h mode 1: activation to int8 once per row, dpbusd against the
+ * planar nibbles). Measured on the 35B: expert compute 22.7 to 15.9
+ * ms/token for +0.1% perplexity. QWEN_EXPERT_ACT=f32 restores mode 0, f32
+ * activations and the bit-identical contract with the pair kernels. */
+static int xf_act_mode(void){ static int v=-1; if(v<0){ const char *e=getenv("QWEN_EXPERT_ACT"); v=(e&&!strcmp(e,"f32"))?0:1; } return v; }
 static int xf_mode(Model *m) {
     static int v = -1;
     if (v >= 0) return v;
@@ -1037,8 +1044,131 @@ static void matmul_qe(float *y, const float *x, const int8_t *q, const float *sc
  * matmul_d dispatches via pointer lookup to matmul_q; COLI_DENSE_I8=0 falls
  * back to f32 (reference path for parity tests). ~4x less memory traffic. */
 #define QDW_MAX 1024
-static struct { const float *w; int8_t *q; float *sc; int I, O; } g_qdw[QDW_MAX];
+/* q/sc: int8 rows with one scale per row (the classic copy, what the VRAM
+ * tier uploads). q4/sg: the same matrix as int4 planar blocks of 64 with one
+ * scale per group (COLI_DENSE_BITS=4), the layout the K1b grouped kernel
+ * reads; ng = I/64 groups per row. */
+static struct { const float *w; int8_t *q; float *sc; int I, O; uint8_t *q4; float *sg; int ng; } g_qdw[QDW_MAX];
 static int g_qdw_n = 0;
+/* ---- Dense trunk, integer dot products ------------------------------------
+ *
+ * Every dense GEMV of a token (DeltaNet projections and out_proj, attention
+ * q/k/v/o, the shared expert, lm_head) used to multiply int8 weights by f32
+ * activations: each weight byte converted to f32 and fed to an FMA, eight
+ * weights per instruction. Measured on lm_head (248320 x 2048 int8, 508 MB)
+ * that runs at 29 GB/s on a 16-core AVX-512 host whose memory bus does 80:
+ * the kernel, not the bus, was the limit, and the dense part of a token is
+ * 1.9 GB of int8 on the 35B, three times the routed experts.
+ *
+ * The activation is now quantized to int8 once per call (one scale,
+ * amax/127, the qrow_i8 contract the expert IDOT already uses) and the dot
+ * is integer: 32 weights per instruction on AVX2 (maddubs), 64 on AVX-512
+ * VNNI, exact int32 sums scaled once per output. Not bit-identical to the
+ * f32 path (the activation is rounded): measured on the 35B, +1.0%
+ * perplexity on 4 x 512 tokens, lm_head 12.6 to 10.2 ms/token, decode
+ * 6.71 to 7.35 tok/s alone and 8.23 with the experts' int8 activations.
+ * COLI_DENSE_IDOT=0 restores the f32-activation kernel.
+ *
+ * COLI_DENSE_BITS=4 additionally stores the dense matrices as int4 in blocks
+ * of 64 with one scale per block, the K1b planar layout, halving the bytes
+ * the token reads; lm_head alone goes from 508 to 254 MB. It implies the
+ * integer dot (that layout has no f32 kernel). Same gate: measured. */
+static int dense_idot_on(void){ static int v=-1; if(v<0){ const char *e=getenv("COLI_DENSE_IDOT"); v=!(e&&*e=='0'); } return v; }
+static int dense_bits(void){ static int v=-1; if(v<0){ const char *e=getenv("COLI_DENSE_BITS"); v=(e&&atoi(e)==4)?4:8; } return v; }
+
+/* Activation -> int8 with one scale, plus the int32 sum of every block of 64
+ * (the K1b kernel subtracts 8*sum per group because its nibbles are unsigned).
+ * Vectorized: the scalar lrintf loop was measured at ~7 us for 4096 values,
+ * which times ~150 GEMVs per token is a millisecond thrown away. Rounding is
+ * to nearest even in both paths, so the vector path equals qrow_i8 bit for bit. */
+static float dense_act_i8(const float *x, int I, int8_t *xq, int32_t *xsg){
+    float amax = 0.f;
+    int i = 0;
+#ifdef __AVX2__
+    {
+        __m256 am = _mm256_setzero_ps();
+        const __m256 sign = _mm256_set1_ps(-0.0f);
+        for (; i + 8 <= I; i += 8) am = _mm256_max_ps(am, _mm256_andnot_ps(sign, _mm256_loadu_ps(x + i)));
+        float tmp[8]; _mm256_storeu_ps(tmp, am);
+        for (int k = 0; k < 8; k++) if (tmp[k] > amax) amax = tmp[k];
+    }
+#endif
+    for (; i < I; i++) { float a = fabsf(x[i]); if (a > amax) amax = a; }
+    float s = amax / 127.f; if (s < 1e-12f) s = 1e-12f;
+    float inv = 1.f / s;
+    i = 0;
+#ifdef __AVX2__
+    {
+        const __m256 vinv = _mm256_set1_ps(inv);
+        for (; i + 32 <= I; i += 32) {
+            __m256i a = _mm256_cvtps_epi32(_mm256_mul_ps(_mm256_loadu_ps(x + i),      vinv));
+            __m256i b = _mm256_cvtps_epi32(_mm256_mul_ps(_mm256_loadu_ps(x + i + 8),  vinv));
+            __m256i c = _mm256_cvtps_epi32(_mm256_mul_ps(_mm256_loadu_ps(x + i + 16), vinv));
+            __m256i d = _mm256_cvtps_epi32(_mm256_mul_ps(_mm256_loadu_ps(x + i + 24), vinv));
+            /* packs interleave 128-bit lanes: fix the order with one permute */
+            __m256i ab = _mm256_packs_epi32(a, b), cd = _mm256_packs_epi32(c, d);
+            __m256i abcd = _mm256_packs_epi16(ab, cd);
+            abcd = _mm256_permutevar8x32_epi32(abcd, _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7));
+            _mm256_storeu_si256((__m256i *)(xq + i), abcd);
+        }
+    }
+#endif
+    for (; i < I; i++) xq[i] = (int8_t)lrintf(x[i] * inv);
+    if (xsg) {
+        int ng = I / 64;
+        for (int g = 0; g < ng; g++) {
+            int32_t sum = 0;
+            for (int k = 0; k < 64; k++) sum += xq[g * 64 + k];
+            xsg[g] = sum;
+        }
+    }
+    return s;
+}
+
+/* f32 rows -> int4 in blocks of 64 with one f32 scale per block, packed as the
+ * K1b planar layout (unsigned nibbles v+8, block b: lo nibbles = elements
+ * b*64..b*64+31, hi = b*64+32..b*64+63). The quantizer is the symmetric
+ * absmax/7 the expert containers use. */
+static void pack_int4_g64_planar(const float *w, uint8_t *q4, float *sg, int O, int I){
+    int rb = I / 2, ng = I / 64;
+    #pragma omp parallel for schedule(static)
+    for (int o = 0; o < O; o++) {
+        const float *wr = w + (int64_t)o * I;
+        uint8_t *row = q4 + (int64_t)o * rb;
+        float *sr = sg + (int64_t)o * ng;
+        for (int g = 0; g < ng; g++) {
+            const float *blk = wr + g * 64;
+            float amax = 0.f;
+            for (int k = 0; k < 64; k++) { float a = fabsf(blk[k]); if (a > amax) amax = a; }
+            /* absmax/7 is where the search starts; the scale is then refined
+             * by least squares against the rounded codes (s = w.q / q.q) and
+             * the candidate with the smallest squared error wins. Three
+             * rounds: measured on the 35B this recovers a third of the
+             * perplexity absmax alone loses at 4 bits. */
+            float best_s = amax / 7.f; if (best_s < 1e-8f) best_s = 1e-8f;
+            int best_q[64]; double best_err = 1e30;
+            float s = best_s;
+            for (int round = 0; round < 4; round++) {
+                int q[64]; double err = 0, wq = 0, qq = 0;
+                float inv = 1.f / s;
+                for (int k = 0; k < 64; k++) {
+                    int v = (int)lrintf(blk[k] * inv); if (v > 7) v = 7; if (v < -8) v = -8;
+                    q[k] = v; double d = (double)blk[k] - (double)v * s; err += d * d;
+                    wq += (double)blk[k] * v; qq += (double)v * v;
+                }
+                if (err < best_err) { best_err = err; best_s = s; memcpy(best_q, q, sizeof q); }
+                if (qq <= 0) break;
+                float ns = (float)(wq / qq);          /* least-squares scale for these codes */
+                if (ns <= 0.f || ns == s) break;
+                s = ns;
+            }
+            sr[g] = best_s;
+            uint8_t *dst = row + g * 32;
+            for (int k = 0; k < 32; k++)
+                dst[k] = (uint8_t)((best_q[k] + 8) | ((best_q[k + 32] + 8) << 4));
+        }
+    }
+}
 #ifdef COLI_QWEN_BATCH_TEST
 static uint64_t g_qwen_matmul_d_calls;
 #endif
@@ -1048,7 +1178,27 @@ static int dense_i8_on(void){ static int v=-1; if(v<0){ const char *e=getenv("CO
  * the time. */
 static int kv_prefix_off(void){ const char *e=getenv("COLI_KV_PREFIX"); return e && *e=='0'; }
 static int dense_batch_on(void){ const char *e=getenv("QWEN_DENSE_BATCH"); return !(e&&*e=='0'); }
-static void qdw_register(const float *W, int I, int O){
+/* COLI_DENSE_INT4 names which components take the int4 copy when
+ * COLI_DENSE_BITS=4: a comma list of lmhead, dnproj, dnout, attn, shexp,
+ * router; unset means all of them. The parts of the trunk pay 4 bits
+ * differently (measured: the attention projections and the DeltaNet input
+ * projections cost the most perplexity, lm_head the least per byte saved),
+ * so the default is chosen per component from the numbers, not for the
+ * whole trunk at once. */
+static int dense_int4_wanted(const char *tag){
+    if (dense_bits() != 4 || !tag) return 0;
+    const char *e = getenv("COLI_DENSE_INT4");
+    if (!e || !*e) return 1;
+    size_t n = strlen(tag);
+    for (const char *p = e; *p; ) {
+        while (*p == ',' || *p == ' ') p++;
+        const char *q = p; while (*q && *q != ',' && *q != ' ') q++;
+        if ((size_t)(q - p) == n && !strncmp(p, tag, n)) return 1;
+        p = q;
+    }
+    return 0;
+}
+static void qdw_register_as(const float *W, int I, int O, const char *tag){
     if (!W || !dense_i8_on() || g_qdw_n >= QDW_MAX) return;
     int8_t *q = malloc((size_t)O*I); float *sc = malloc((size_t)O*sizeof(float));
     if (!q || !sc) { free(q); free(sc); return; }
@@ -1060,13 +1210,40 @@ static void qdw_register(const float *W, int I, int O){
         int8_t *d = q + (int64_t)o*I;
         for (int i = 0; i < I; i++) { int v = (int)lrintf(r[i]*inv); if (v>127) v=127; if (v<-127) v=-127; d[i] = (int8_t)v; }
     }
-    g_qdw[g_qdw_n].w=W; g_qdw[g_qdw_n].q=q; g_qdw[g_qdw_n].sc=sc; g_qdw[g_qdw_n].I=I; g_qdw[g_qdw_n].O=O; g_qdw_n++;
+    g_qdw[g_qdw_n].w=W; g_qdw[g_qdw_n].q=q; g_qdw[g_qdw_n].sc=sc; g_qdw[g_qdw_n].I=I; g_qdw[g_qdw_n].O=O;
+    g_qdw[g_qdw_n].q4=NULL; g_qdw[g_qdw_n].sg=NULL; g_qdw[g_qdw_n].ng=0;
+    if (dense_int4_wanted(tag) && I%64==0) {
+        uint8_t *q4=malloc((size_t)O*(I/2)); float *sg=malloc((size_t)O*(I/64)*sizeof(float));
+        if (q4 && sg) {
+            pack_int4_g64_planar(W, q4, sg, O, I);
+            g_qdw[g_qdw_n].q4=q4; g_qdw[g_qdw_n].sg=sg; g_qdw[g_qdw_n].ng=I/64;
+        } else { free(q4); free(sg); }
+    }
+    g_qdw_n++;
 }
+static void qdw_register(const float *W, int I, int O){ qdw_register_as(W, I, O, NULL); }
 static void matmul_d(float *y, const float *x, const float *W, int S, int I, int O){
 #ifdef COLI_QWEN_BATCH_TEST
     g_qwen_matmul_d_calls++;
 #endif
     for (int i = 0; i < g_qdw_n; i++) if (g_qdw[i].w == W && g_qdw[i].I == I) {
+        if (g_qdw[i].q4 || dense_idot_on()) {
+            /* integer dot: the activation rows to int8 once, then the K1b
+             * grouped kernel (int4 planar) or the per-row int8 kernel */
+            int ng = I / 64;
+            int8_t *xq = malloc((size_t)S * I);
+            float *sx = malloc((size_t)S * sizeof(float));
+            int32_t *xsg = g_qdw[i].q4 ? malloc((size_t)S * ng * sizeof(int32_t)) : NULL;
+            if (xq && sx && (!g_qdw[i].q4 || xsg)) {
+                for (int s = 0; s < S; s++)
+                    sx[s] = dense_act_i8(x + (int64_t)s * I, I, xq + (int64_t)s * I, xsg ? xsg + (int64_t)s * ng : NULL);
+                if (g_qdw[i].q4) matmul_i4p_grouped_idot(y, xq, sx, xsg, g_qdw[i].q4, g_qdw[i].sg, S, I, O, 64);
+                else             matmul_q_idot(y, xq, sx, g_qdw[i].q, g_qdw[i].sc, S, I, O);
+                free(xq); free(sx); free(xsg);
+                return;
+            }
+            free(xq); free(sx); free(xsg);      /* out of memory: the f32 path below */
+        }
         if (S > 1 && dense_batch_on())
             matmul_q_batch(y, x, g_qdw[i].q, g_qdw[i].sc, S, I, O);
         else
@@ -2023,9 +2200,9 @@ static void moe_xf_run(Model *m, int layer, const float *x, int S, float *out, c
                 exp[dst] = &ex[dst];
             }
             double t1 = timed ? tm_now() : 0;
-            if (kper == K) xf_moe_run(out + (int64_t)s0 * D, x + (int64_t)s0 * D, per, K, D, F, ridx, rval, exp, 0, scratch);
+            if (kper == K) xf_moe_run(out + (int64_t)s0 * D, x + (int64_t)s0 * D, per, K, D, F, ridx, rval, exp, xf_act_mode(), scratch);
             else {
-                xf_moe_run(tmp, x + (int64_t)s0 * D, 1, 1, D, F, ridx, rval, exp, 0, scratch);
+                xf_moe_run(tmp, x + (int64_t)s0 * D, 1, 1, D, F, ridx, rval, exp, xf_act_mode(), scratch);
                 float *os = out + (int64_t)s0 * D; for (int d = 0; d < D; d++) os[d] += tmp[d];
             }
             if (timed) { double t2 = tm_now(); g_xf_load += t1 - t0; g_xf_run += t2 - t1; }
@@ -3630,16 +3807,16 @@ int main(int argc, char **argv) {
         int q_out = qc->q_heads * qc->q_head_dim, kv_out = qc->kv_heads * qc->k_head_dim;
         for (int i = 0; i < qc->n_layers; i++) {
             Layer *l = &m.L[i];
-            qdw_register(l->q, D2, q_out); qdw_register(l->k, D2, kv_out);
-            qdw_register(l->v, D2, kv_out); qdw_register(l->o, qc->o_in, D2);
-            qdw_register(l->gate, D2, qc->n_experts);
-            qdw_register(l->sh_g, D2, qc->shared_inter); qdw_register(l->sh_u, D2, qc->shared_inter);
-            qdw_register(l->sh_d, qc->shared_inter, D2);
-            qdw_register(l->dn_qkv, D2, qc->dn_conv_dim);
-            qdw_register(l->dn_z, D2, qc->dn_vheads * qc->dn_vdim);
-            qdw_register(l->dn_out, qc->dn_vheads * qc->dn_vdim, D2);
+            qdw_register_as(l->q, D2, q_out, "attn"); qdw_register_as(l->k, D2, kv_out, "attn");
+            qdw_register_as(l->v, D2, kv_out, "attn"); qdw_register_as(l->o, qc->o_in, D2, "attn");
+            qdw_register_as(l->gate, D2, qc->n_experts, "router");
+            qdw_register_as(l->sh_g, D2, qc->shared_inter, "shexp"); qdw_register_as(l->sh_u, D2, qc->shared_inter, "shexp");
+            qdw_register_as(l->sh_d, qc->shared_inter, D2, "shexp");
+            qdw_register_as(l->dn_qkv, D2, qc->dn_conv_dim, "dnproj");
+            qdw_register_as(l->dn_z, D2, qc->dn_vheads * qc->dn_vdim, "dnproj");
+            qdw_register_as(l->dn_out, qc->dn_vheads * qc->dn_vdim, D2, "dnout");
         }
-        qdw_register(m.lm_head, D2, qc->vocab);
+        qdw_register_as(m.lm_head, D2, qc->vocab, "lmhead");
         /* Free the f32 originals -- the pointers only serve as lookup keys in
          * matmul_d from here on (never dereferenced again).
          * COLI_KEEP_F32=1 keeps them (debug). */
