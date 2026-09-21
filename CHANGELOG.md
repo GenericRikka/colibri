@@ -28,6 +28,14 @@ is now measured on the card in front of it instead of predicted.
 
 ### Brio and the serve contract
 
+- **#1662**: `POST /v1/systemone`, the request and the reply of TypeSafe's
+  Jev API, served by the brio channel: a client written for it points at
+  colibri and changes the base URL. `noul` is a yes/no question, `choice`
+  scores the labels with their descriptions in the text, `score` the level
+  numbers with the expected value and the legend; `confidence` by their
+  documented formula. Any `model` name is accepted on that route. Measured on
+  the real Qwen3.6: the three-question example of the docs in 1m46 with the
+  state read once.
 - **#1655**: the DeepSeek V4 engine speaks the numeric channel (`logprobs=k`,
   `pin=1`, `max_tokens=0`), so `/v1/brio` works on the ninth engine instead
   of answering 500 (#1648). The head that used to keep only its argmax now
