@@ -95,6 +95,10 @@ int main(void) {
     setenv("COLI_PLACE", "", 1);                    /* "" == unset == auto */
     setenv("CUDA_EXPERT_GB", "1", 1);               /* room for everything */
     unsetenv("COLI_DENSE_I8");
+    /* the GEMV from VRAM is compared with the CPU's f32-activation kernel, the
+     * contract the tier uploads: the integer dense path rounds the activation
+     * and is measured elsewhere (test_qwen36_dense_idot) */
+    setenv("COLI_DENSE_IDOT", "0", 1);
     fake_ndev = 1; fake_uploads = 0; fake_dense_compute = 1;
 
     Model m; build(&m);
