@@ -147,7 +147,7 @@ jobs:
   musl:
     name: musl libc (Alpine)
     runs-on: ubuntu-latest
-    container: alpine:3.21
+    container: alpine:3.24
     steps:
       # #1430: colibri did not compile against musl, because malloc_trim is a
       # glibc extension guarded on __linux__ rather than on __GLIBC__. Nothing in
