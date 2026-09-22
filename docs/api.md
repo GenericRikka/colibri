@@ -95,7 +95,9 @@ admission queue instead of pretending to run unsafe parallel sequences.
 Configure it with `--max-queue N` (default 8) and `--queue-timeout SECONDS`
 (default 300), or the `COLI_MAX_QUEUE` / `COLI_QUEUE_TIMEOUT` environment
 variables. Saturated and timed-out requests receive OpenAI-shaped HTTP 429
-errors before streaming headers are sent. `GET /health` exposes
+errors before streaming headers are sent. With `--max-queue 0`, a request
+pinned to an occupied KV slot is rejected immediately even if another slot
+is free. `GET /health` exposes
 active/queued/completed/rejected counters, and successful generation responses
 include `x-colibri-queue-wait-ms`.
 

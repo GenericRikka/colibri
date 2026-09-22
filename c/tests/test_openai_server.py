@@ -650,6 +650,20 @@ class SchedulerTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "queue_full")
         self.assertEqual(scheduler.snapshot()["rejected"], 1)
 
+    def test_zero_queue_rejects_busy_pinned_slot_with_spare_capacity(self):
+        scheduler = GenerationScheduler(max_queue=0, queue_timeout=0.01, capacity=2)
+        with scheduler.admit(slot=0):
+            with self.assertRaises(APIError) as caught:
+                with scheduler.admit(slot=0):
+                    self.fail("busy pinned slot admitted")
+            self.assertEqual(caught.exception.code, "queue_full")
+            with scheduler.admit(slot=1) as (_, slot):
+                self.assertEqual(slot, 1)
+        stats = scheduler.snapshot()
+        self.assertEqual((stats["rejected"], stats["timed_out"], stats["queued"]), (1, 0, 0))
+        self.assertEqual((stats["admitted"], stats["completed"], stats["active"]), (2, 2, 0))
+        self.assertIn("colibri_scheduler_queue_wait_seconds_count 2\n", scheduler.prometheus())
+
     def test_times_out_and_cancels_queued_requests(self):
         scheduler = GenerationScheduler(max_queue=2, queue_timeout=0.02)
         with scheduler.admit():

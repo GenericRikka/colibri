@@ -146,7 +146,8 @@ class GenerationScheduler:
             if self.closed:
                 raise APIError(503, "The inference scheduler is shutting down.", None,
                                "scheduler_closed", "server_error")
-            if (self.active >= self.capacity or self.queue) and len(self.queue) >= self.max_queue:
+            slot_busy = not self.free_slots if slot is None else slot not in self.free_slots
+            if (slot_busy or self.queue) and len(self.queue) >= self.max_queue:
                 self.rejected += 1
                 raise APIError(429, "The inference queue is full.", None, "queue_full",
                                "rate_limit_error", {"Retry-After": "1"})
