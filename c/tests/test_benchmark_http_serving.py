@@ -90,6 +90,23 @@ class BenchmarkTest(unittest.TestCase):
                 self.assertEqual(row["completion_tokens"], 3)
                 self.assertLessEqual(row["first_output_seconds"], row["duration_seconds"])
 
+    def test_legacy_function_call_output_and_validation(self):
+        for function, valid, output in (({"name": "lookup"}, True, True),
+                                        ({"arguments": "{}"}, True, True),
+                                        ({"arguments": ""}, True, False),
+                                        ("lookup", False, False),
+                                        ({"arguments": 42}, False, False)):
+            with self.subTest(function=function):
+                chunk = {"choices": [{"index": 0, "delta": {"function_call": function},
+                                      "finish_reason": "function_call"}]}
+                self.server.body = (event(chunk) + event("[DONE]")).encode()
+                row = self.request()
+                self.assertEqual(row["success"], valid)
+                if valid:
+                    self.assertEqual(row["first_output_seconds"] is not None, output)
+                    summary = bench.summarize([row], 1, slo_first_output=5)
+                    self.assertEqual(summary["latency_slo"]["requests_met"], int(output))
+
     def test_empty_output_is_not_first_output(self):
         self.server.body = stream({"content": "", "tool_calls": [{"id": "id", "function": {}}]}, usage=0)
         row = self.request()

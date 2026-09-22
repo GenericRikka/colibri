@@ -141,7 +141,8 @@ Measurement boundaries:
   `--timeout` limits individual socket operations, **not total request time**;
   a stream that keeps sending data can last longer.
 - `first_output_seconds` measures receipt of the first nonempty content,
-  reasoning, or tool-function name/arguments delta. Role-only and empty deltas
+  reasoning, or tool-function name/arguments delta (`tool_calls` or legacy
+  `function_call`). Role-only and empty deltas
   do not count. This is client-visible first output latency, not necessarily
   time to a visible answer or to exactly one token. Empty successful output
   has no first-output sample. SSE chunk gaps are not reported as token latency.

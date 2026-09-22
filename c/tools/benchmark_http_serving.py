@@ -83,9 +83,12 @@ def has_output(delta):
         output |= nonempty_text(delta.get(field))
     calls = delta.get("tool_calls")
     if calls is None:
-        return output
+        calls = []
     if not isinstance(calls, list):
         raise StreamError("invalid_tool_calls")
+    legacy = delta.get("function_call")
+    if legacy is not None:
+        calls = calls + [{"function": legacy}]
     for tool in calls:
         if not isinstance(tool, dict):
             raise StreamError("invalid_tool_call")
