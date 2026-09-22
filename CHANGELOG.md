@@ -5,7 +5,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [1.12.1] — 2026-09-22
 
-65 pull requests since v1.12.0, 53 of them from contributors. Two tokenizers
+66 pull requests since v1.12.0, 54 of them from contributors. Two tokenizers
 brought back to the reference, brio on the ninth engine, `coli chat` working
 again at the default context on two families, and a placement decision that
 is now measured on the card in front of it instead of predicted.
@@ -238,6 +238,14 @@ is now measured on the card in front of it instead of predicted.
   dependency. The admission scheduler distinguishes completion, failure
   and cancellation, lets a request use a free slot that no earlier waiter
   reserved, and joins the keepalive pump before the slot is released.
+- **#1402** (enitimeago): a request whose last message is a non-empty
+  `assistant` turn continues that turn instead of answering in a new one, on
+  `/v1/chat/completions` and `/v1/messages`, for all nine families (Kimi K3
+  frames the open turn engine-side); the prompt ends inside the turn as the
+  official template renders it without a generation cue. On by default,
+  `COLI_CONTINUE_ASSISTANT=0` restores the old behaviour; refused together
+  with tools or a turn ending in whitespace, with a 400 that says why. Each
+  renderer is pinned against the vendored template (#1401).
 - **#1605**: `ORACLE_STRICT=1` makes a GLM oracle comparison exit non-zero
   when it fails, token-exact by default with `ORACLE_TF_MAX_MISMATCHES` for
   the documented teacher-forcing allowance; references are validated before
