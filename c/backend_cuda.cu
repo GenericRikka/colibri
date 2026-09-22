@@ -63,7 +63,7 @@ struct ColiCudaTensor {
     int fmt, I, O, device;
     int gs;                    /* quant group size; 0 = per-row scales (#334) */
     int ng;                    /* number of scale groups per row = ceil(I/gs) for fmt=4 */
-    size_t scale_count;        /* floats in `scales`: O per-row, O*ng grouped */
+    size_t scale_count;        /* scale elements: ue8m0 bytes for fmt=7, floats otherwise */
     int tracked;
     int weights_owned;
 #ifdef COLI_ANS
@@ -73,6 +73,11 @@ struct ColiCudaTensor {
     RaggedKVEntry ragged[512];
     int ragged_count;
 };
+
+static size_t tensor_scale_bytes(const ColiCudaTensor *t) {
+    if (!t->fmt || t->fmt == 6) return 0;
+    return t->scale_count * (t->fmt == 7 ? sizeof(uint8_t) : sizeof(float));
+}
 
 #ifdef COLI_ANS
 struct AnsArenaChunk { uint8_t *p; size_t used,cap; };
@@ -1426,6 +1431,10 @@ extern "C" int coli_cuda_tensor_upload(ColiCudaTensor **tensor,
     t->gs = (fmt==4 && g_upload_gs>0) ? g_upload_gs : 0;
     t->ng = t->gs ? (I + t->gs - 1) / t->gs : 1;
     t->scale_count = t->gs ? (size_t)O * (size_t)t->ng : (size_t)O;
+    if (fmt == 7) {
+        t->ng = (I + 31) / 32;
+        t->scale_count = (size_t)O * t->ng;
+    }
     if (fmt == 8) {   /* per-128x128-block scales: [ceil(O/128), ceil(I/128)] */
         t->ng = (I + 127) / 128;
         t->scale_count = (size_t)((O + 127) / 128) * (size_t)t->ng;
@@ -1446,8 +1455,8 @@ extern "C" int coli_cuda_tensor_upload(ColiCudaTensor **tensor,
         offset_to_signed_s4<<<(unsigned)((t->weight_bytes+255)/256),256>>>((uint8_t*)t->weights,t->weight_bytes);
         if(!cuda_ok(cudaGetLastError(),"int4 weight conversion")){coli_cuda_tensor_free(t);return 0;}}
     if (fmt && fmt != 6) {
-        if (!cuda_ok(cudaMalloc(&t->scales, t->scale_count * sizeof(float)), "scale allocation") ||
-            !cuda_ok(cudaMemcpy(t->scales, scales, t->scale_count * sizeof(float), cudaMemcpyHostToDevice), "scale upload")) {
+        if (!cuda_ok(cudaMalloc(&t->scales, tensor_scale_bytes(t)), "scale allocation") ||
+            !cuda_ok(cudaMemcpy(t->scales, scales, tensor_scale_bytes(t), cudaMemcpyHostToDevice), "scale upload")) {
             coli_cuda_tensor_free(t);
             return 0;
         }
@@ -1455,7 +1464,7 @@ extern "C" int coli_cuda_tensor_upload(ColiCudaTensor **tensor,
     if (fmt == 6) t->scale_count = 0;      /* in-block scales: nothing separate to track */
     t->tracked = 1;
     ctx->tensor_count++;
-    ctx->tensor_bytes += t->weight_bytes + ((fmt && fmt != 6) ? t->scale_count * sizeof(float) : 0);
+    ctx->tensor_bytes += t->weight_bytes + tensor_scale_bytes(t);
     *tensor = t;
     return 1;
 }
@@ -1641,10 +1650,9 @@ extern "C" int coli_cuda_tensor_update(ColiCudaTensor *tensor,
             (uint8_t*)tensor->weights,tensor->weight_bytes);
         if(!cuda_ok(cudaGetLastError(),"int4 weight refresh")) return 0;
     }
-    /* fmt=6 has no scale buffer at all (scales live in-block, scale_count 0), and
-     * the fallback below would otherwise copy O floats out of a NULL host pointer. */
+    /* fmt=6 stores scales in-block; fmt=7 stores byte exponents separately. */
     return !tensor->fmt || tensor->fmt==6 || cuda_ok(cudaMemcpy(tensor->scales,scales,
-        (tensor->scale_count?tensor->scale_count:(size_t)tensor->O)*sizeof(float),
+        tensor_scale_bytes(tensor),
         cudaMemcpyHostToDevice),"scale refresh");
 }
 
@@ -2392,19 +2400,14 @@ extern "C" void coli_cuda_tensor_free(ColiCudaTensor *tensor) {
     DeviceContext *ctx = find_ctx(tensor->device);
     if (ctx) select_ctx(ctx);
     if (tensor->tracked && ctx) {
-        /* Must mirror the upload's accounting exactly -- literally the same
-         * expression upload uses to charge (scale_count * sizeof(float), gated
-         * on fmt=6 never having a separate scale buffer), so the two can no
-         * longer drift independently. Over-subtracting here trips the >= guard
-         * below, which silently leaves the tensor's bytes on the device counter
-         * forever. */
+        /* Charge and release the same format-specific scale storage. */
         size_t storage_bytes =
 #ifdef COLI_ANS
             tensor->compressed ? tensor->archive_bytes :
 #endif
             tensor->weight_bytes;
         size_t bytes = storage_bytes +
-            ((tensor->fmt && tensor->fmt != 6) ? tensor->scale_count * sizeof(float) : 0);
+            tensor_scale_bytes(tensor);
         if (ctx->tensor_count) ctx->tensor_count--;
         if (ctx->tensor_bytes >= bytes) ctx->tensor_bytes -= bytes;
     }
@@ -2416,19 +2419,14 @@ extern "C" void coli_cuda_tensor_free(ColiCudaTensor *tensor) {
 
 extern "C" size_t coli_cuda_tensor_bytes(const ColiCudaTensor *tensor) {
     if (!tensor) return 0;
-    /* Must mirror upload's and free's accounting exactly -- literally the same
-     * expression they use (scale_count * sizeof(float), gated on fmt=6 never
-     * having a separate scale buffer) -- so all three can no longer drift
-     * independently. The prior `O * ng` shape over-reported for fmt=8 (real
-     * footprint is (O+127)/128 * ng block scales, not O * ng) and for fmt=6
-     * (which has no separate scale buffer at all). */
+    /* Logical size uses the same scale layout as upload and free. */
     size_t storage_bytes =
 #ifdef COLI_ANS
         tensor->compressed ? tensor->archive_bytes :
 #endif
         tensor->weight_bytes;
     return storage_bytes +
-        ((tensor->fmt && tensor->fmt != 6) ? tensor->scale_count * sizeof(float) : 0);
+        tensor_scale_bytes(tensor);
 }
 
 /* What a cudaMalloc of `bytes` actually takes off the card.
@@ -2542,7 +2540,7 @@ extern "C" size_t coli_cuda_tensor_vram(const ColiCudaTensor *tensor) {
         tensor->weight_bytes;
     size_t total = coli_cuda_alloc_footprint(storage_bytes);
     if (tensor->fmt && tensor->fmt != 6)
-        total += coli_cuda_alloc_footprint(tensor->scale_count * sizeof(float));
+        total += coli_cuda_alloc_footprint(tensor_scale_bytes(tensor));
     return total;
 }
 
