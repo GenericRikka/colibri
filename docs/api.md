@@ -103,7 +103,9 @@ active/queued/completed/rejected counters, and successful generation responses
 include `x-colibri-queue-wait-ms`.
 Requests targeting any slot may use a free slot not reserved by earlier waiters.
 An earlier pinned request keeps priority for its target; an earlier any-slot
-request keeps priority across all slots.
+request keeps priority across all slots. A full waiting queue does not reject
+a request that can immediately take an unreserved free slot; the queue limit
+bounds waiting requests, independently of active capacity.
 
 ## Prometheus metrics
 

@@ -146,8 +146,7 @@ class GenerationScheduler:
             if self.closed:
                 raise APIError(503, "The inference scheduler is shutting down.", None,
                                "scheduler_closed", "server_error")
-            slot_busy = not self.free_slots if slot is None else slot not in self.free_slots
-            if (slot_busy or self.queue) and len(self.queue) >= self.max_queue:
+            if self._available_slot(slot) is None and len(self.queue) >= self.max_queue:
                 self.rejected += 1
                 raise APIError(429, "The inference queue is full.", None, "queue_full",
                                "rate_limit_error", {"Retry-After": "1"})
@@ -171,18 +170,8 @@ class GenerationScheduler:
                     self.condition.notify_all()
                     raise APIError(429, "Timed out waiting for the inference engine.", None,
                                    "queue_timeout", "rate_limit_error", {"Retry-After": "1"})
-                candidates = self.free_slots.copy() if slot is None else self.free_slots & {slot}
-                # Older pinned waiters reserve only their target. An older
-                # any-slot waiter has priority over every available slot.
-                for earlier_ticket, earlier_slot in self.queue:
-                    if earlier_ticket is ticket:
-                        break
-                    if earlier_slot is None:
-                        candidates.clear()
-                        break
-                    candidates.discard(earlier_slot)
-                if candidates:
-                    available = min(candidates)
+                available = self._available_slot(slot, ticket)
+                if available is not None:
                     break
                 self.condition.wait(min(remaining, 0.25))
             self.queue.remove(entry)
@@ -206,6 +195,18 @@ class GenerationScheduler:
                 setattr(self, outcome, getattr(self, outcome) + 1)
                 self._observe("slot_duration_seconds", time.monotonic() - admitted_at)
                 self.condition.notify_all()
+
+    def _available_slot(self, slot, ticket=None):
+        # Caller holds the condition lock. Pinned waiters reserve only their
+        # target; an older any-slot waiter has priority over every free slot.
+        candidates = self.free_slots.copy() if slot is None else self.free_slots & {slot}
+        for earlier_ticket, earlier_slot in self.queue:
+            if earlier_ticket is ticket:
+                break
+            if earlier_slot is None:
+                return None
+            candidates.discard(earlier_slot)
+        return min(candidates, default=None)
 
     def snapshot(self):
         with self.condition:

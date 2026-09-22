@@ -675,6 +675,36 @@ class SchedulerTest(unittest.TestCase):
                 wait.assert_called_once()
                 self.assertEqual(scheduler.snapshot()["queued"], 0)
 
+    def test_full_queue_still_admits_unreserved_free_slot(self):
+        for requested in (None, 1):
+            with self.subTest(requested=requested):
+                scheduler = GenerationScheduler(max_queue=1, capacity=2)
+                with scheduler.admit(slot=0):
+                    older = (object(), 0)
+                    scheduler.queue.append(older)
+                    try:
+                        with scheduler.admit(slot=requested) as (_, slot):
+                            self.assertEqual(slot, 1)
+                            self.assertEqual(scheduler.snapshot()["active"], 2)
+                            self.assertEqual(list(scheduler.queue), [older])
+                    finally:
+                        scheduler.queue.remove(older)
+                self.assertEqual(scheduler.snapshot()["rejected"], 0)
+                self.assertEqual(scheduler.snapshot()["completed"], 2)
+
+    def test_full_queue_does_not_bypass_older_slot_reservations(self):
+        for older_slot, requested in ((None, None), (None, 1), (0, 0)):
+            with self.subTest(older_slot=older_slot, requested=requested):
+                scheduler = GenerationScheduler(max_queue=1, capacity=2)
+                older = (object(), older_slot)
+                scheduler.queue.append(older)
+                with self.assertRaises(APIError) as caught:
+                    with scheduler.admit(slot=requested):
+                        self.fail("bypassed older waiter")
+                self.assertEqual(caught.exception.code, "queue_full")
+                self.assertEqual(list(scheduler.queue), [older])
+                self.assertEqual(scheduler.snapshot()["rejected"], 1)
+
     def test_zero_queue_rejects_busy_pinned_slot_with_spare_capacity(self):
         scheduler = GenerationScheduler(max_queue=0, queue_timeout=0.01, capacity=2)
         with scheduler.admit(slot=0):
