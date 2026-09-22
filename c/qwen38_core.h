@@ -1778,6 +1778,11 @@ static void q38_attention(Model *m,Layer *l,int layer,const float *x,int S,int p
     float *ip=falloc((int64_t)S*(IQ+c->idx_kheads)*ID);
     q38_dense_matmul(m,qp,x,&l->q,S,H,QH*2*D);q38_dense_matmul(m,kp,x,&l->k,S,H,KVH*D);q38_dense_matmul(m,vp,x,&l->v,S,H,KVH*D);
     q38_dense_matmul(m,ip,x,&l->idx_qk,S,H,(IQ+c->idx_kheads)*ID);
+    /* Cause before parallelism: the K/V/IK writes are disjoint per position
+     * (each s writes only its own row) and must be complete before the
+     * ranking, which reads the whole IK[0..pos] prefix.  Guarded on S>1 so
+     * decode keeps the serial path it has today. */
+    #pragma omp parallel for schedule(static) if(S>1)
     for(int s=0;s<S;s++){
         int pos=pos_base+s;
         for(int h=0;h<KVH;h++){
@@ -1787,12 +1792,28 @@ static void q38_attention(Model *m,Layer *l,int layer,const float *x,int S,int p
         }
         memcpy(m->IK[layer]+(int64_t)pos*ID,ip+(int64_t)s*(IQ+1)*ID+(int64_t)IQ*ID,(size_t)ID*sizeof(float));
     }
-    float *heads=falloc((int64_t)S*QH*D),*qidx=falloc((int64_t)IQ*ID),*pool=falloc(ID);
-    int *selected=(int*)malloc((size_t)maxsel*sizeof(int));
-    if(!selected){fprintf(stderr,"OOM QSA selection\n");exit(1);}
+    float *heads=falloc((int64_t)S*QH*D);
+    /* Ranking and attention are independent per position: no shared writes
+     * (heads is row-disjoint, the scratch is per-thread) and no FP order
+     * changes inside a position, so the result is bit-identical to the
+     * serial path. The scheduling is dynamic because the ranking cost grows
+     * with the position (the IK prefix to read is O(pos)). */
+    double index_dt=0,attn_dt=0;
+    /* Wall, not aggregate CPU: the reduction below sums per-thread seconds, so
+     * at prefill these two phases would report ~20x what the clock saw while
+     * every other phase reports wall -- on a 3006-token prompt the phase sum
+     * came to 510 s against a 268 s TTFT, the parts outweighing the whole.
+     * Take the clock across the whole team and split it by CPU share.  At
+     * decode S==1 the loop is serial, cpu_total equals the wall, and the
+     * rescale below is an exact no-op. */
+    double qsa_wall_started=now_s();
+    #pragma omp parallel for schedule(dynamic,8) reduction(+:index_dt,attn_dt) if(S>1)
     for(int s=0;s<S;s++){
         int pos=pos_base+s,visible=pos+1,blocks=visible/R,tail=blocks*R;
         double phase_started=now_s();
+        float *qidx=falloc((int64_t)IQ*ID),*pool=falloc(ID);
+        int *selected=(int*)malloc((size_t)maxsel*sizeof(int));
+        if(!selected){fprintf(stderr,"OOM QSA selection\n");exit(1);}
         for(int h=0;h<IQ;h++){float *qh=qidx+(int64_t)h*ID;memcpy(qh,ip+(int64_t)s*(IQ+1)*ID+(int64_t)h*ID,(size_t)ID*sizeof(float));q38_rms0(qh,qh,l->idx_qn,ID,c->eps);q38_rope(qh,ID,c->rotary_dim,pos,c->theta);}
         int take=blocks<c->idx_budget/R?blocks:c->idx_budget/R,nsel=0;
         Q38Block *rank=blocks?(Q38Block*)malloc((size_t)blocks*sizeof(Q38Block)):NULL;
@@ -1805,7 +1826,7 @@ static void q38_attention(Model *m,Layer *l,int layer,const float *x,int S,int p
         if(blocks)qsort(rank,(size_t)blocks,sizeof(Q38Block),q38_block_desc);
         for(int z=0;z<take;z++)for(int r=0;r<R;r++)selected[nsel++]=rank[z].block*R+r;
         for(int t=tail;t<visible;t++)selected[nsel++]=t;free(rank);
-        q38_tm_add(m,Q38_TM_QSA_INDEX,phase_started); phase_started=now_s();
+        index_dt+=now_s()-phase_started; phase_started=now_s();
         for(int h=0;h<QH;h++){
             float *qraw=qp+(int64_t)s*QH*2*D+(int64_t)h*2*D;
             float *qh=falloc(D);memcpy(qh,qraw,(size_t)D*sizeof(float));q38_rms0(qh,qh,l->qn,D,c->eps);q38_rope(qh,D,c->rotary_dim,pos,c->theta);
@@ -1816,10 +1837,18 @@ static void q38_attention(Model *m,Layer *l,int layer,const float *x,int S,int p
             for(int j=0;j<nsel;j++){float a=score[j]/den;const float *vh=m->V[layer]+((int64_t)khidx*m->kv_cap+selected[j])*D;for(int d=0;d<D;d++)oh[d]+=a*vh[d];}
             for(int d=0;d<D;d++)oh[d]*=q38_sigmoid(qraw[D+d]);free(qh);free(score);
         }
-        q38_tm_add(m,Q38_TM_QSA_ATTENTION,phase_started);
+        attn_dt+=now_s()-phase_started;
+        free(qidx);free(pool);free(selected);
     }
+    double qsa_wall=now_s()-qsa_wall_started,cpu_total=index_dt+attn_dt;
+    if(cpu_total>0.0){
+        index_dt=qsa_wall*(index_dt/cpu_total);
+        attn_dt =qsa_wall*(attn_dt /cpu_total);
+    }
+    m->timers.seconds[Q38_TM_QSA_INDEX]+=index_dt;
+    m->timers.seconds[Q38_TM_QSA_ATTENTION]+=attn_dt;
     q38_dense_matmul(m,out,heads,&l->o,S,QH*D,H);
-    free(qp);free(kp);free(vp);free(ip);free(heads);free(qidx);free(pool);free(selected);
+    free(qp);free(kp);free(vp);free(ip);free(heads);
 }
 
 /* The single-row path is intentionally kept separate from prefill.  Decode is
