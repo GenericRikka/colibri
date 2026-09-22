@@ -1115,17 +1115,25 @@ uint32_t qt_issue(int layer,const int *eids,int K,const float *x){
     return mask;
 }
 
-void qt_take(uint32_t mask,const float *val,int K,float *out){
+int qt_take(uint32_t mask,const float *val,int K,float *out){
     (void)K;
-    if(!G.on) return;
+    if(!G.on) return mask==0;
+    const float *result[QT_MAX_DEV]={0};
+    int ok=1;
+    /* Drain every device before deciding whether this layer is usable. */
     if(mask) for(int di=0;di<G.ndev;di++){
-        int c=G.is_cnt[di];
-        if(!c) continue;
-        const float *y=coli_cuda_expert_group_take(G.dev[di]);
-        if(!y) continue;
-        for(int j=0;j<c;j++){
+        if(!G.is_cnt[di]) continue;
+        result[di]=coli_cuda_expert_group_take(G.dev[di]);
+        if(!result[di]){
+            fprintf(stderr,"[qtier] dev %d: expert group result unavailable\n",G.dev[di]);
+            ok=0;
+        }
+    }
+    /* Do not publish a partial contribution when any device failed. */
+    for(int di=0;di<G.ndev;di++){
+        if(ok && result[di]) for(int j=0;j<G.is_cnt[di];j++){
             float w=val[G.is_k[di][j]];
-            const float *row=y+(size_t)j*G.D;
+            const float *row=result[di]+(size_t)j*G.D;
             for(int d=0;d<G.D;d++) out[d]+=w*row[d];
         }
         G.is_cnt[di]=0;
@@ -1134,6 +1142,7 @@ void qt_take(uint32_t mask,const float *val,int K,float *out){
     G.issue_open=0;
     pthread_cond_broadcast(&G.cv_take);
     pthread_mutex_unlock(&G.mx);
+    return ok;
 }
 
 void qt_stats(void){

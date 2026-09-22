@@ -1862,6 +1862,10 @@ tests/test_qwen36_tier_shutdown$(EXE): tests/test_qwen36_tier_shutdown.c tests/q
 tests/test_qwen36_tier_invariants$(EXE): tests/test_qwen36_tier_invariants.c tests/qwen36_fake_cuda.h qwen36_tier.c qwen36_tier.h backend_cuda.h compat.h
 	$(CC) $(CFLAGS) -DCOLI_CUDA $< -o $@ $(LDFLAGS)
 
+# Async collection errors must drain all devices and reject partial output.
+tests/test_qwen36_tier_take_error$(EXE): tests/test_qwen36_tier_take_error.c tests/qwen36_fake_cuda.h qwen36_tier.c qwen36_tier.h backend_cuda.h compat.h
+	$(CC) $(CFLAGS) -DCOLI_CUDA $< -o $@ $(LDFLAGS)
+
 # Same fake backend, with uploads that take time: qt_fill_wait must not return
 # until the last enqueued expert is RESIDENT, not merely dequeued -- the engine
 # frees the RAM int8 copies right after it (#1360 saw the gap one run in

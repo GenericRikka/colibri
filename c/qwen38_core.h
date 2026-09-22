@@ -1992,7 +1992,10 @@ static void q38_moe_decode(Model *m,Layer *l,int layer,const float *x,int S,floa
         }
         /* GPU experts land after the CPU ones: same values, one more group in
          * the float sum (that is the only ordering difference to a CPU run). */
-        qt_take(qmask,route_gates,K,ys);
+        if(!qt_take(qmask,route_gates,K,ys)){
+            fprintf(stderr,"qwen38: CUDA expert collection failed at layer %d; stopping inference\n",layer);
+            exit(1);
+        }
         for(int d=0;d<H;d++)ys[d]+=gate*shared[d];
     }
     rt_trace_end();

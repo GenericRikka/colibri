@@ -114,8 +114,10 @@ void qt_note(int layer, int eid,
  * the GPU. Compute the misses on the CPU, then call qt_take(). */
 uint32_t qt_issue(int layer, const int *eids, int K, const float *x);
 
-/* Collect the GPU results and accumulate val[k]*y_k into out[hidden]. */
-void qt_take(uint32_t mask, const float *val, int K, float *out);
+/* Collect all GPU results and accumulate val[k]*y_k into out[hidden].
+ * Returns 0 on collection failure, leaving out unchanged. The caller must
+ * stop inference: experts selected by qt_issue were not computed on CPU. */
+int qt_take(uint32_t mask, const float *val, int K, float *out);
 
 /* Warmstart: plan the full fill set (heat order, budget reserved), then any
  * number of loader threads may call qt_note_planned per planned expert. */
@@ -153,7 +155,7 @@ static inline int  qt_is_resident(int a,int b){(void)a;(void)b;return 0;}
 static inline void qt_shutdown(void){}
 static inline void qt_note(int a,int b,const uint8_t*c,const uint8_t*d,const uint8_t*e,const float*f,const float*g,const float*h){(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;}
 static inline uint32_t qt_issue(int a,const int*b,int c,const float*d){(void)a;(void)b;(void)c;(void)d;return 0;}
-static inline void qt_take(uint32_t a,const float*b,int c,float*d){(void)a;(void)b;(void)c;(void)d;}
+static inline int qt_take(uint32_t a,const float*b,int c,float*d){(void)b;(void)c;(void)d;return a==0;}
 static inline int  qt_plan_fill(int*a,int*b,int c){(void)a;(void)b;(void)c;return 0;}
 static inline void qt_note_planned(int a,int b,const uint8_t*c,const uint8_t*d,const uint8_t*e,const float*f,const float*g,const float*h){(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;}
 static inline int  qt_fill_next(int*a,int*b){(void)a;(void)b;return 0;}
