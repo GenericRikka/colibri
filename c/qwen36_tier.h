@@ -85,6 +85,8 @@ int  qt_dnproj_matmul(int layer, float *y, const float *x, int I, int O);
  * Returns the handle (>= 0) or -1 (stays on the CPU). */
 int  qt_dense_init(const int8_t *q, const float *sc, int I, int O, int device);
 int  qt_dense_matmul(int handle, float *y, const float *x, int I, int O);
+/* Row-major x[S,I] -> y[S,O], using the same resident int8 tensor. */
+int  qt_dense_matmul_batch(int handle, float *y, const float *x, int S, int I, int O);
 int  qt_dense_count(void);
 
 /* fp8 streaming mode (Qwen3.8): experts arrive as e4m3 bytes with 128x128
@@ -151,6 +153,7 @@ static inline int  qt_dnproj_init(int a,const int8_t*b,const float*c,int d,int e
 static inline int  qt_dnproj_matmul(int a,float*b,const float*c,int d,int e){(void)a;(void)b;(void)c;(void)d;(void)e;return 0;}
 static inline int  qt_dense_init(const int8_t*a,const float*b,int c,int d,int e){(void)a;(void)b;(void)c;(void)d;(void)e;return -1;}
 static inline int  qt_dense_matmul(int a,float*b,const float*c,int d,int e){(void)a;(void)b;(void)c;(void)d;(void)e;return 0;}
+static inline int  qt_dense_matmul_batch(int a,float*b,const float*c,int d,int e,int f){(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;return 0;}
 static inline int  qt_dense_count(void){return 0;}
 static inline int  qt_ready(void){return 0;}
 static inline int  qt_is_resident(int a,int b){(void)a;(void)b;return 0;}
