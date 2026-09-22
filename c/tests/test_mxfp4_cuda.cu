@@ -204,6 +204,41 @@ static void all_codes(void) {
     else printf("  ok   all 16 e2m1 codes decode exactly (cpu == gpu == spec)\n");
 }
 
+/* Resident upload/update must use O*ceil(I/32) BYTES, including tails.
+ * Positive inputs avoid cancellation so every missing group affects the result. */
+static void resident_case(int I, int O) {
+    const int S = 2, rb = (I + 1) / 2, ng = (I + 31) / 32;
+    uint8_t *q = (uint8_t *)malloc((size_t)O * rb);
+    uint8_t *sc = (uint8_t *)malloc((size_t)O * ng);
+    float *x = (float *)malloc((size_t)S * I * sizeof(float));
+    float *want = (float *)malloc((size_t)S * O * sizeof(float));
+    float *got = (float *)malloc((size_t)S * O * sizeof(float));
+    memset(q, 0x22, (size_t)O * rb);
+    for (int i = 0; i < S * I; i++) x[i] = 0.25f * (1 + i % 3);
+    size_t count0, bytes0, count1, bytes1;
+    coli_cuda_stats(0, &count0, &bytes0);
+    ColiCudaTensor *t = nullptr;
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < O * ng; i++) sc[i] = (uint8_t)(125 + (i + pass) % 5);
+        const float *scales = reinterpret_cast<const float *>(sc);
+        int ok = pass ? coli_cuda_tensor_update(t, q, scales)
+                      : coli_cuda_tensor_upload(&t, q, scales, 7, I, O, 0);
+        if (!ok) { printf("  FAIL resident upload/update\n"); fails++; break; }
+        size_t expected = (size_t)O * (rb + ng);
+        coli_cuda_stats(0, &count1, &bytes1);
+        if (coli_cuda_tensor_bytes(t) != expected || count1 != count0 + 1 || bytes1 != bytes0 + expected) {
+            printf("  FAIL resident byte accounting I=%d O=%d\n", I, O); fails++;
+        }
+        mxfp4_ref(want, x, q, sc, S, I, O);
+        if (!coli_cuda_matmul(&t, got, x, nullptr, nullptr, 7, S, I, O, 0, 0)) fails++;
+        else compare_case(pass ? "resident refresh" : "resident upload", want, got, S, I, O);
+    }
+    coli_cuda_tensor_free(t);
+    coli_cuda_stats(0, &count1, &bytes1);
+    if (count0 != count1 || bytes0 != bytes1) { printf("  FAIL resident free accounting\n"); fails++; }
+    free(q); free(sc); free(x); free(want); free(got);
+}
+
 int main(void) {
     int ndev = 0;
     if (cudaGetDeviceCount(&ndev) != cudaSuccess || ndev < 1) {
@@ -216,6 +251,8 @@ int main(void) {
         return 0;
     }
 
+    resident_case(33, 3);     /* 6 exponent bytes, not 12 */
+    resident_case(257, 5);    /* 45 exponent bytes, not 20 */
     all_codes();
     one_case("decode + matmul",            1,   64,   32, -1);
     one_case("multi-row batch",            4,  128,   64, -1);
