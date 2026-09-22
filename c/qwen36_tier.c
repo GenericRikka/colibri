@@ -614,8 +614,9 @@ int qt_init(int nl, int ne, int D, int Ih, int cap, int topk, int expert_gs,
      * is the resident count. The 22-28 % the granularity costs is real; only
      * pooling experts into one arena per device would win it back (open). */
     size_t mat_bytes = G.wfmt==4 ? (size_t)D*Ih/2 : (size_t)D*Ih;
-    size_t scl_bytes = (2*G.sc_gu+G.sc_d)/3*sizeof(float);
-    G.exp_bytes = 3*dev_alloc_footprint(mat_bytes) + 3*dev_alloc_footprint(scl_bytes); /* + allocation slack */
+    G.exp_bytes = 3*dev_alloc_footprint(mat_bytes)
+                + 2*dev_alloc_footprint(G.sc_gu*sizeof(float))
+                + dev_alloc_footprint(G.sc_d*sizeof(float));
 
     /* Per-device allowance for tier + trunk: CUDA_EXPERT_GB when numeric,
      * else free minus 1 GB headroom. The heat table is loaded here too (it
