@@ -1089,6 +1089,7 @@ uint32_t qt_issue(int layer,const int *eids,int K,const float *x){
      * six entries still queued). No group is open here, so the wait cannot
      * meet a swap parked on issue_open. */
     if(G_upload_sync) while(G.inflight>0 && !G.th_stop) wait_take_locked();
+    if(G.th_stop){ pthread_mutex_unlock(&G.mx); return 0; }
     if(layer==0) qt_lfru_tick_locked();
     G.issue_open=1;
     for(int k=0;k<K;k++){
