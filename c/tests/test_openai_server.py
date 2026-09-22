@@ -532,6 +532,64 @@ class ProtocolTest(unittest.TestCase):
             listener.close()
 
 
+class GenerationMetricsTest(unittest.TestCase):
+    def setUp(self):
+        self.server = APIServer(("127.0.0.1", 0), FakeEngine(), "test")
+        self.addCleanup(self.server.server_close)
+
+    def test_records_first_output_once_and_preserves_text_and_stats(self):
+        output = []
+        with patch("openai_server.time.monotonic", side_effect=[10, 10.5, 13]):
+            stats = self.server.generate("prompt", 4, 0, 1, output.append)
+        self.assertEqual(output, ["Hé", "llo"])
+        self.assertEqual(stats["completion_tokens"], 2)
+        metrics = self.server.scheduler.prometheus()
+        self.assertIn("colibri_scheduler_first_output_seconds_sum 0.5\n", metrics)
+        self.assertIn("colibri_scheduler_first_output_seconds_count 1\n", metrics)
+        self.assertIn("colibri_scheduler_engine_call_seconds_sum 3.0\n", metrics)
+        self.assertIn("colibri_scheduler_engine_call_seconds_count 1\n", metrics)
+
+    def test_empty_output_does_not_count_but_tool_output_does(self):
+        text, tools = [], []
+        def generate(prompt, maximum, temperature, top_p, on_text, **kwargs):
+            on_text("")
+            kwargs["on_tool"]("")
+            kwargs["on_tool"]("tool payload")
+            on_text("tail")
+            return {"completion_tokens": 2}
+        with patch.object(self.server.engine, "generate", side_effect=generate), \
+             patch("openai_server.time.monotonic", side_effect=[10, 12, 15]):
+            self.server.generate("prompt", 4, 0, 1, text.append, on_tool=tools.append)
+        self.assertEqual(text, ["", "tail"])
+        self.assertEqual(tools, ["", "tool payload"])
+        metrics = self.server.scheduler.prometheus()
+        self.assertIn("colibri_scheduler_first_output_seconds_sum 2.0\n", metrics)
+        self.assertIn("colibri_scheduler_first_output_seconds_count 1\n", metrics)
+
+    def test_error_and_cancellation_before_output_do_not_invent_first_output(self):
+        for error in (RuntimeError("failed"), ClientCancelled()):
+            with patch.object(self.server.engine, "generate", side_effect=error), \
+                 patch("openai_server.time.monotonic", side_effect=[10, 14]):
+                with self.assertRaises(type(error)):
+                    self.server.generate("prompt", 4, 0, 1, lambda text: None)
+        metrics = self.server.scheduler.prometheus()
+        self.assertIn("colibri_scheduler_first_output_seconds_count 0\n", metrics)
+        self.assertIn("colibri_scheduler_engine_call_seconds_sum 8.0\n", metrics)
+        self.assertIn("colibri_scheduler_engine_call_seconds_count 2\n", metrics)
+
+    def test_failure_after_output_keeps_both_observations(self):
+        def generate(prompt, maximum, temperature, top_p, on_text):
+            on_text("partial")
+            raise RuntimeError("failed after output")
+        with patch.object(self.server.engine, "generate", side_effect=generate), \
+             patch("openai_server.time.monotonic", side_effect=[10, 11, 12]):
+            with self.assertRaises(RuntimeError):
+                self.server.generate("prompt", 4, 0, 1, lambda text: None)
+        metrics = self.server.scheduler.prometheus()
+        self.assertIn("colibri_scheduler_first_output_seconds_count 1\n", metrics)
+        self.assertIn("colibri_scheduler_engine_call_seconds_count 1\n", metrics)
+
+
 class SchedulerTest(unittest.TestCase):
     def test_engine_failure_is_not_a_completed_request(self):
         scheduler = GenerationScheduler()

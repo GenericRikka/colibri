@@ -119,6 +119,8 @@ All names start with `colibri_scheduler_`:
 | `cancelled_total` | counter | Cancellations while queued or admitted |
 | `queue_wait_seconds` | histogram | Wait until admission, for admitted requests only |
 | `slot_duration_seconds` | histogram | Slot occupancy until completion, failure, or cancellation |
+| `first_output_seconds` | histogram | Engine-call start to first nonempty text or tool-output callback |
+| `engine_call_seconds` | histogram | Duration of each finished engine generation call, including failure/cancellation |
 
 Histogram buckets are 0.001, 0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30, 60, 300 seconds,
 and `+Inf`; each histogram exposes `_bucket`, `_sum`, and `_count`.
@@ -126,9 +128,19 @@ Counters reset when the gateway restarts. Collection does not call the engine
 or consume a generation slot. `failed` is also included in `/health`'s
 authenticated scheduler snapshot; failures no longer increment `completed`.
 
-These are admission/slot metrics, not TTFT, per-token latency, or GPU kernel
-measurements. Slot occupancy includes any response handling while the slot is
-held. Validation/authentication failures before admission are not counted.
+The engine-call histograms exclude admission queue wait and prompt rendering.
+First output is observed before the gateway's stop filtering, reasoning split,
+or HTTP serialization: it can be reasoning or tool data, not necessarily
+user-visible answer text. Empty callbacks, ACCEPT frames, and SSE keepalives do
+not count. Calls that finish or fail without output add no first-output sample;
+a failure after output retains that sample. Engine-call duration includes callback
+processing and response writes during generation. One request can invoke the
+engine multiple times (for example Brio scoring), so these histogram counts are
+engine calls, not HTTP request counts.
+
+These are gateway observations, not end-to-end client TTFT, per-token latency,
+or GPU kernel measurements. Output callbacks need not correspond one-to-one to
+tokens. Slot occupancy includes any response handling while the slot is held. Validation/authentication failures before admission are not counted.
 `completed` means the admitted handler returned normally, not that the client
 received every response byte. Request exceptions can include client input or
 transport errors as well as engine failures.

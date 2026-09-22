@@ -134,7 +134,8 @@ class GenerationScheduler:
         self.timed_out = 0
         self.cancelled = 0
         self.timings = {name: {"sum": 0.0, "buckets": [0] * len(self._buckets)}
-                        for name in ("queue_wait_seconds", "slot_duration_seconds")}
+                        for name in ("queue_wait_seconds", "slot_duration_seconds",
+                                     "first_output_seconds", "engine_call_seconds")}
 
     @contextlib.contextmanager
     def admit(self, cancelled=None, slot=None):
@@ -227,6 +228,10 @@ class GenerationScheduler:
             if seconds <= bound:
                 timing["buckets"][i] += 1
 
+    def observe_timing(self, name, seconds):
+        with self.condition:
+            self._observe(name, seconds)
+
     def prometheus(self):
         """One consistent, bounded snapshot; no prompt or request-ID labels."""
         gauges = {"active": "Currently admitted requests.",
@@ -249,7 +254,9 @@ class GenerationScheduler:
                                   f"{name} {value}"))
             for field, help_text in (
                     ("queue_wait_seconds", "Queue wait of admitted requests only."),
-                    ("slot_duration_seconds", "Slot occupancy of finished admitted requests, including errors and cancellation.")):
+                    ("slot_duration_seconds", "Slot occupancy of finished admitted requests, including errors and cancellation."),
+                    ("first_output_seconds", "Engine-call start to first nonempty text or tool callback, excluding queue wait."),
+                    ("engine_call_seconds", "Duration of finished engine generation calls, including errors and cancellation.")):
                 name = "colibri_scheduler_" + field
                 timing = self.timings[field]
                 lines.extend((f"# HELP {name} {help_text}", f"# TYPE {name} histogram"))
@@ -3589,6 +3596,27 @@ class APIServer(ThreadingHTTPServer):
         self._conn_by_ip = {}
         self._conn_owner = {}
 
+    def generate(self, prompt, max_tokens, temperature, top_p, on_text, *args, **kwargs):
+        started = time.monotonic()
+        first_output = False
+
+        def measured(callback):
+            def feed(text):
+                nonlocal first_output
+                if text and not first_output:
+                    first_output = True
+                    self.scheduler.observe_timing("first_output_seconds", time.monotonic() - started)
+                return callback(text)
+            return feed
+
+        if kwargs.get("on_tool") is not None:
+            kwargs["on_tool"] = measured(kwargs["on_tool"])
+        try:
+            return self.engine.generate(prompt, max_tokens, temperature, top_p,
+                                        measured(on_text), *args, **kwargs)
+        finally:
+            self.scheduler.observe_timing("engine_call_seconds", time.monotonic() - started)
+
     def process_request(self, request, client_address):
         """Refuse past the caps instead of spawning an unbounded thread."""
         peer = client_address[0] if client_address else "?"
@@ -4199,7 +4227,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 def on_accept(value):
                     accepted.update(value)
 
-                self.server.engine.generate(
+                self.server.generate(
                     text, 0, 0.0, 1.0, lambda _chunk: None, cache_slot,
                     self.client_disconnected, logprobs=1, pin=pin,
                     on_echo=echoes.append, on_accept=on_accept)
@@ -4513,7 +4541,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 def generation_stopped():
                     return stop_filter.stopped() or sideband.stopped()
 
-                stats = self.server.engine.generate(
+                stats = self.server.generate(
                     prompt, maximum, temperature, top_p, stop_filter.feed, cache_slot,
                     self.client_disconnected, grammar=grammar, stopped=generation_stopped,
                     **({"on_tool": sideband.feed} if sideband.enabled else {}),
@@ -4695,7 +4723,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 def generation_stopped():
                     return stop_filter.stopped() or sideband.stopped()
 
-                stats = self.server.engine.generate(
+                stats = self.server.generate(
                     prompt, maximum, temperature, top_p, stop_filter.feed, cache_slot,
                     self.client_disconnected, grammar=grammar, stopped=generation_stopped,
                     **({"on_tool": sideband.feed} if sideband.enabled else {}),
@@ -4728,7 +4756,7 @@ class APIHandler(BaseHTTPRequestHandler):
                         sys.stderr.write(chunk); sys.stderr.flush()
                     (content_split.feed if content_split else emit)(chunk)
                 stop_filter = StopFilter(stop_sequences, emit_plain, ignore_leading_stop)
-                stats = self.server.engine.generate(
+                stats = self.server.generate(
                     prompt, maximum, temperature, top_p, stop_filter.feed, cache_slot,
                     self.client_disconnected, grammar=grammar, stopped=stop_filter.stopped,
                     on_accept=start_stream, **({"audio": audio} if audio else {}),
@@ -4946,7 +4974,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 def generation_stopped():
                     return stop_filter.stopped() or sideband.stopped()
 
-                stats = self.server.engine.generate(
+                stats = self.server.generate(
                     prompt, maximum, temperature, top_p, stop_filter.feed, cache_slot,
                     self.client_disconnected, grammar=grammar, stopped=generation_stopped,
                     **({"on_tool": sideband.feed} if sideband.enabled else {}))
@@ -5087,7 +5115,7 @@ class APIHandler(BaseHTTPRequestHandler):
             def generation_stopped():
                 return stop_filter.stopped() or sideband.stopped()
 
-            stats = self.server.engine.generate(
+            stats = self.server.generate(
                 prompt, maximum, temperature, top_p, stop_filter.feed, cache_slot,
                 lambda: not connected[0], grammar=grammar, stopped=generation_stopped,
                 **({"on_tool": sideband.feed} if sideband.enabled else {}))
