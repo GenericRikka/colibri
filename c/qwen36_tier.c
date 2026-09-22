@@ -491,6 +491,7 @@ static const float *G_fp8_lut;
 static int G_upload_sync;             /* QT_UPLOAD_SYNC=1: qt_issue waits for in-flight uploads first (tests) */
 
 int qt_init_fp8(int nl, int ne, int D, int Ih, int cap, int topk, const float *e4m3_lut){
+    if(G.on) return 0;
     G_fp8_stream = 1; G_fp8_lut = e4m3_lut;
     int ok = qt_init(nl, ne, D, Ih, cap, topk, 0, 0);
     if(!ok) G_fp8_stream = 0;
@@ -517,6 +518,7 @@ static size_t dev_alloc_footprint(size_t bytes){
 
 int qt_init(int nl, int ne, int D, int Ih, int cap, int topk, int expert_gs,
             int expert_is_int4){
+    if(G.on) return 0;
     const char *e=getenv("COLI_CUDA");
     if(!(e && *e=='1')) return 0;
     if(cap != ne && !G_fp8_stream){

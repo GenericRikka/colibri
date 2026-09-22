@@ -67,8 +67,34 @@ int main(void) {
             failed=1;goto done;
         }
     }
+    fail_stage=0;
+    float lut[256]={0}, other_lut[256]={0};
+    for(int fp8=0;fp8<2;fp8++){
+        int rc=fp8 ? qt_init_fp8(1,2,64,32,2,1,lut) : qt_init(1,2,64,32,2,1,0,1);
+        if(!rc){failed=1;goto done;}
+        QSlot *slots=G.slot;
+        float *inputs=G.is_x;
+        pthread_t uploader_thread=G.th;
+        int allocations=live;
+        const float *table=G_fp8_lut;
+        if(qt_init(2,2,64,32,2,1,0,1) ||
+           qt_init_fp8(2,2,64,32,2,1,other_lut) ||
+           !G.on || G.nl!=1 || G.slot!=slots || G.is_x!=inputs ||
+           !pthread_equal(G.th,uploader_thread) || live!=allocations ||
+           G_fp8_stream!=fp8 || G_fp8_lut!=table){
+            fputs("active tier initialization corrupted live state\n",stderr);
+            failed=1;goto done;
+        }
+        qt_shutdown();
+        /* Until the separate shutdown PR lands, reclaim its retained host state. */
+        free(G.slot);G.slot=NULL;free(G.is_x);G.is_x=NULL;
+        free(G.heat0);G.heat0=NULL;free(G.fill_order);G.fill_order=NULL;
+        if(conds){pthread_cond_destroy(&G.cv);pthread_cond_destroy(&G.cv_take);}
+        if(mutexes) pthread_mutex_destroy(&G.mx);
+        if(live || mutexes || conds){failed=1;goto done;}
+    }
 done:
     remove(path);
-    if(!failed) puts("tier init failure: ok (12 cases)");
+    if(!failed) puts("tier init failure: ok (12 failure cases and active int4/FP8 preservation)");
     return failed;
 }

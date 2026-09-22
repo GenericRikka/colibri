@@ -92,6 +92,8 @@ int  qt_dense_count(void);
  * the tier copies what it uploads inside the qt_note call and keeps no
  * pointer into the engine's slot. e4m3_lut is quant.h's E4M3_LUT, published
  * to the backend so fmt=8 uploads are accepted. */
+/* Init returns 0 without changing an active tier. Shut down before reinit;
+ * callers must serialize init/shutdown with new work. */
 int  qt_init_fp8(int n_layers, int n_experts, int hidden, int inter,
                  int cap_experts_per_layer, int topk, const float *e4m3_lut);
 int  qt_init(int n_layers, int n_experts, int hidden, int inter,
