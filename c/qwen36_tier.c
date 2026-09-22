@@ -205,6 +205,11 @@ static void *uploader(void *arg){
               && coli_cuda_tensor_upload(&td, w+2*mb, sc+2*G.Ih,   2, G.Ih, G.D,  dv);
         }
         free(w); free(sc);
+        if(!ok){
+            if(tg) coli_cuda_tensor_free(tg);
+            if(tu) coli_cuda_tensor_free(tu);
+            if(td) coli_cuda_tensor_free(td);
+        }
         pthread_mutex_lock(&G.mx);
         QSlot *s=qs(layer,eid);
         if(ok){ s->tg=tg; s->tu=tu; s->td=td; s->resident=1; G.uploads++; }
