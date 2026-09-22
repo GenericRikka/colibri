@@ -45,7 +45,7 @@ static struct {
     QSlot *slot;                          /* [nl*ne] */
     pthread_mutex_t mx;
     pthread_t th;
-    int th_stop;
+    int th_stop, waiters;
     /* upload ring with staging copies */
     struct { int layer, eid; uint8_t *w; float *s; int v_layer, v_eid; } q[QT_QCAP];
     int qh, qt_, qn;
@@ -67,6 +67,13 @@ static struct {
     uint64_t tick, swaps, pf_hits, pf_notes;
     uint32_t *heat0;                      /* heat table loaded from HEAT_FILE */
 } G;
+
+/* Count parked callers so shutdown can reclaim their shared storage safely. */
+static void wait_take_locked(void){
+    G.waiters++;
+    pthread_cond_wait(&G.cv_take,&G.mx);
+    if(--G.waiters==0 && G.th_stop) pthread_cond_broadcast(&G.cv_take);
+}
 
 static QSlot *qs(int layer, int eid){ return &G.slot[(size_t)layer*G.ne + eid]; }
 static int home(int eid){ return eid % G.ndev; }
@@ -156,7 +163,7 @@ static void *uploader(void *arg){
         pthread_cond_broadcast(&G.cv_take);          /* queue space available */
         if(ve>=0){
             /* LFRU swap: free the victim only when no group is in flight */
-            while(G.issue_open && !G.th_stop) pthread_cond_wait(&G.cv_take,&G.mx);
+            while(G.issue_open && !G.th_stop) wait_take_locked();
             QSlot *v=qs(vl,ve);
             if(G.th_stop && G.issue_open){
                 /* Shutting down with a group still open: qt_take() -- the only
@@ -946,7 +953,7 @@ void qt_note_block(int layer,int eid,
     pthread_mutex_lock(&G.mx);
     if(G_fp8_stream) stream_point(s,g4,u4,d4,gs,us,ds);
     else if(!s->g4){ s->g4=g4; s->u4=u4; s->d4=d4; s->gs=gs; s->us=us; s->ds=ds; }
-    while(G.qn>=QT_QCAP && !G.th_stop) pthread_cond_wait(&G.cv_take,&G.mx);
+    while(G.qn>=QT_QCAP && !G.th_stop) wait_take_locked();
     enqueue_locked(layer,eid,-1,-1,0);
     if(G_fp8_stream) stream_forget(s);
     pthread_mutex_unlock(&G.mx);
@@ -1039,7 +1046,7 @@ void qt_note_planned(int layer,int eid,
     }
     if(G_fp8_stream) stream_point(s,g4,u4,d4,gs,us,ds);
     else if(!s->g4){ s->g4=g4; s->u4=u4; s->d4=d4; s->gs=gs; s->us=us; s->ds=ds; }
-    while(G.qn>=QT_QCAP && !G.th_stop) pthread_cond_wait(&G.cv_take,&G.mx);
+    while(G.qn>=QT_QCAP && !G.th_stop) wait_take_locked();
     if(!enqueue_locked(layer,eid,-1,-1,1)){
         /* not enqueueable (e.g. already resident): return the reservation */
         if(s->planned) G.used[home(eid)]-=G.exp_bytes;
@@ -1058,7 +1065,7 @@ void qt_note_planned(int layer,int eid,
 void qt_fill_wait(void){
     if(!G.on) return;
     pthread_mutex_lock(&G.mx);
-    while(G.inflight>0 && !G.th_stop) pthread_cond_wait(&G.cv_take,&G.mx);
+    while(G.inflight>0 && !G.th_stop) wait_take_locked();
     pthread_mutex_unlock(&G.mx);
 }
 
@@ -1105,7 +1112,8 @@ uint32_t qt_issue(int layer,const int *eids,int K,const float *x){
      * did not get scheduled once before the run was over (0 uploads, 0 hits,
      * six entries still queued). No group is open here, so the wait cannot
      * meet a swap parked on issue_open. */
-    if(G_upload_sync) while(G.inflight>0 && !G.th_stop) pthread_cond_wait(&G.cv_take,&G.mx);
+    if(G_upload_sync) while(G.inflight>0 && !G.th_stop) wait_take_locked();
+    if(G.th_stop){ pthread_mutex_unlock(&G.mx); return 0; }
     if(layer==0) qt_lfru_tick_locked();
     G.issue_open=1;
     for(int k=0;k<K;k++){
@@ -1191,6 +1199,11 @@ void qt_stats(void){
 static void dense_free_all(void){
     for(int h = 0; h < G_dense_n; h++){ if(G_dense[h].t) coli_cuda_tensor_free(G_dense[h].t); G_dense[h].t = NULL; G_dense[h].on = 0; }
     G_dense_n = 0;
+    if(G_lmh.t) coli_cuda_tensor_free(G_lmh.t);
+    memset(&G_lmh,0,sizeof G_lmh);
+    for(int l=0;l<QT_DN_MAX_LAYERS;l++)
+        if(G_dnp[l].t) coli_cuda_tensor_free(G_dnp[l].t);
+    memset(G_dnp,0,sizeof G_dnp);
 }
 void qt_shutdown(void){
     dense_free_all();
@@ -1211,6 +1224,27 @@ void qt_shutdown(void){
      * otherwise never notice th_stop and pthread_join below would hang (#1340). */
     pthread_mutex_lock(&G.mx); G.th_stop=1; pthread_cond_signal(&G.cv); pthread_cond_broadcast(&G.cv_take); pthread_mutex_unlock(&G.mx);
     pthread_join(G.th,NULL);
+    pthread_mutex_lock(&G.mx);
+    while(G.waiters) pthread_cond_wait(&G.cv_take,&G.mx);
+    pthread_mutex_unlock(&G.mx);
+    /* The uploader is stopped, but a decode group may still own the tensors. */
+    for(int di=0;di<G.ndev;di++)
+        if(G.is_cnt[di]) coli_cuda_expert_group_take(G.dev[di]);
+    for(size_t i=0;i<(size_t)G.nl*G.ne;i++){
+        QSlot *s=&G.slot[i];
+        if(s->tg) coli_cuda_tensor_free(s->tg);
+        if(s->tu) coli_cuda_tensor_free(s->tu);
+        if(s->td) coli_cuda_tensor_free(s->td);
+    }
+    free(G.slot); G.slot=NULL;
+    free(G.is_x); G.is_x=NULL; G.is_x_floats=0;
+    free(G.fill_order); G.fill_order=NULL;
+    free(G.heat0); G.heat0=NULL;
+    pthread_cond_destroy(&G.cv_take);
+    pthread_cond_destroy(&G.cv);
+    pthread_mutex_destroy(&G.mx);
+    G.issue_open=0;
+    memset(G.is_cnt,0,sizeof G.is_cnt);
     G.on=0;
     G_fp8_stream=0;
     coli_cuda_shutdown();
