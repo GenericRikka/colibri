@@ -956,6 +956,10 @@ rans: $(RANSLIB)
 $(RANSLIB): tools/rans_ctypes.c rans.h
 	$(CC) $(CFLAGS) -fPIC -shared $< -o $@ $(LDFLAGS)
 
+# Matched resident int8 GPU projection timings; run explicitly, not in CI.
+tests/bench_cuda_resident_batch$(EXE): tests/bench_cuda_resident_batch.cu backend_cuda.cu backend_cuda.h backend_gpu_compat.h
+	"$(GPUCC)" $(GPUFLAGS) backend_cuda.cu tests/bench_cuda_resident_batch.cu -o $@ $(ANS_NVCC_LIBS) $(GPU_TEST_LIBS)
+
 cuda-test: backend_cuda.cu backend_cuda.h backend_gpu_compat.h tests/test_backend_cuda.cu tests/test_ragged_attention.cu tests/test_absorb_determinism.cu tests/test_mxfp4_cuda.cu tests/mxfp4_ref.c tests/test_fp8_warp_cuda.cu tests/test_fp8_cuda.cu tests/test_weights_owned_cuda.cu tests/test_cuda_fmt_trap_cuda.cu tests/test_alloc_footprint_cuda.cu
 	@command -v "$(GPUCC)" >/dev/null 2>&1 || { echo "$(GPUCC_NAME) not found" >&2; exit 1; }
 	"$(GPUCC)" $(GPUFLAGS) backend_cuda.cu tests/test_backend_cuda.cu -o backend_cuda_test$(EXE) $(ANS_NVCC_LIBS) $(GPU_TEST_LIBS)

@@ -197,3 +197,46 @@ particular has no int8 analogue (see **Memory**).
 CPU-only baseline of this engine before the tier: 0.35 tok/s.
 Numerics: logits cosine vs the f32 CPU reference 0.9992 (dense int8 on),
 bit-identical GPU-vs-CPU on the same container (cosine 1.0000001).
+
+## Resident projection batching microbenchmark
+
+Build and run a bounded, model-free comparison of `S` resident-int8 one-row GPU
+calls with one `S`-row GPU call:
+
+```sh
+make -C c tests/bench_cuda_resident_batch CUDA=1 CUDA_ARCH=sm_89
+c/tests/bench_cuda_resident_batch > resident-batch.jsonl
+```
+
+Set `CUDA_HOME` if the toolkit is not on PATH and select the architecture for
+your device. The harness uses CUDA device 0, uploads each matrix once, warms
+both paths twice, then alternates their order over nine paired measurements.
+The host wall time includes synchronous input/output copies and compute, but
+excludes upload and validation. All output elements are checked between arms
+after every pair; sampled elements also have an independent CPU reference.
+JSONL retains all nine timings per arm and the median of the paired ratios.
+An execution/validation failure exits nonzero; absent CUDA initialization exits
+77. The target is explicitly run and is not part of ordinary CI.
+
+A single run on 2026-09-22 (RTX 4070 12 GB, driver 591.86, CUDA 12.9, `sm_89`,
+Core Ultra 9 285K, WSL2 Linux 6.6.114.1, `-O3 -ftz=false`) produced:
+
+| Input × output | Rows | Serial median ms | Batch median ms | Median paired ratio |
+|---|---:|---:|---:|---:|
+| 512 × 1024 | 32 | 2.975 | 0.294 | 10.02 |
+| 2048 × 2048 | 32 | 3.588 | 0.813 | 4.31 |
+| 2048 × 2048 | 128 | 12.716 | 2.913 | 4.37 |
+
+[Raw paired timings](experiments/qwen36-resident-batch-2026-09-22.jsonl)
+include zero sampled CPU-reference error for these deterministic synthetic
+inputs. The device was not isolated: telemetry before/after showed 4% GPU
+utilization, approximately 3 GB occupied VRAM and 2550 MHz SM clock. Timings show
+visible variation; one nine-pair run does not establish reproducibility across
+sessions, devices or real activation distributions.
+
+The serial GPU baseline reflects the projection-call pattern replaced by the
+DeltaNet input batching change. These are synthetic shapes, not complete
+DeltaNet layers: convolution, recurrent updates, normalization, other projections,
+model loading and HTTP queueing are excluded. This is **not** an end-to-end model
+speedup, nor an attention-prefill speedup: the old attention prefill path used
+CPU batch matmul, which is not an arm in this benchmark.
