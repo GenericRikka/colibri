@@ -902,7 +902,9 @@ static double edisk_s(void){ return atomic_load_explicit(&g_edisk_ns,memory_orde
  * served that gets labeled cold overstates the cold class, the bucket this line exists to
  * size). */
 static uint32_t g_direct_heat_ticks=0;
+#ifndef COLIBRI_NO_MAIN
 static int g_direct_heat_explicit=0;    /* 1 if COLI_DISKCLASS_WINDOW was set (skip the auto-derive) */
+#endif
 #define DC_COLD 0
 #define DC_WARM 1
 static _Atomic uint64_t g_dc_n[2];              /* [DC_COLD]/[DC_WARM]: loads classified */
@@ -3968,7 +3970,9 @@ static void qt_matvec_rows(const QT *t, int r0, int n, const float *x, float *y)
     }
 }
 static int g_absorb=-1;
+#if defined(COLI_METAL) || !defined(COLIBRI_NO_MAIN)
 static int g_metal_prefill=0; /* default 0: S>4 prefill attention stays on the CPU (bit-exact). COLI_METAL_PREFILL=1 opts it onto the GPU (~4x, near-tie divergence — see docs/metal.md, #622) */
+#endif
 /* KV8=1: cache latente Lc/Rc in fp8 e4m3 + scala f32 per riga (~4x meno RAM del f32).
  * CPU-only in this PR — sui percorsi CUDA/Metal che leggono righe f32 si spegne da
  * solo (guardie !g_kv8), e forza COLI_CUDA_PIPE=0 (il pipe-prefill legge righe f32).
