@@ -1797,14 +1797,15 @@ static void q38_tier_note(int layer,int eid,const Slot *ex) {
  * CPU (parity runs against the BF16 reference). */
 typedef struct { Q38Weight *w; char name[16]; int layer; } Q38TrunkItem;
 static Q38TrunkItem *g_trunk; static int g_trunk_n, g_trunk_cap, g_trunk_offer_gpu;
+static long g_trunk_min_kb; static const char *g_trunk_skip;   /* read once per load in q38_trunk_offer_all */
 static void q38_trunk_add(Q38Weight *w,const char *name,int layer) {
     if(!w||!w->data||(w->kind!=Q38_WEIGHT_BF16&&w->kind!=Q38_WEIGHT_F32))return;
     size_t bytes=(size_t)w->rows*w->cols+(size_t)w->rows*sizeof(float);
     /* Q38_TRUNK_MIN_KB (default 1024): a round trip costs more than a tiny
-     * GEMV saves; Q38_TRUNK_SKIP=name,name: leave those components on the
-     * CPU (bisecting a numeric difference, or a component that does not pay) */
-    static long min_kb=-1; static const char *skip;
-    if(min_kb<0){ const char *e=getenv("Q38_TRUNK_MIN_KB"); min_kb=e?atol(e):1024; skip=getenv("Q38_TRUNK_SKIP"); }
+     * GEMV saves, and a tiny matrix in BF16 costs nothing on the CPU either;
+     * Q38_TRUNK_SKIP=name,name: leave those components in BF16 on the CPU
+     * (bisecting a numeric difference, or a component that does not pay) */
+    long min_kb=g_trunk_min_kb; const char *skip=g_trunk_skip;
     if(bytes<(size_t)min_kb*1024)return;
     if(skip&&*skip){
         size_t n=strlen(name); const char *s=skip;
@@ -1830,6 +1831,7 @@ static int q38_trunk_enabled(void) {
 static void q38_trunk_offer_all(Model *m) {
     g_trunk_n=0; m->trunk_table_built=1;          /* rebuilt per load: a test opens several models in one process */
     g_trunk_offer_gpu=q38_trunk_enabled();
+    { const char *e=getenv("Q38_TRUNK_MIN_KB"); g_trunk_min_kb=e?atol(e):1024; g_trunk_skip=getenv("Q38_TRUNK_SKIP"); }
     Cfg *c=&m->c;
     q38_trunk_add(&m->lm_head,"lmhead",0);
     for(int l=0;l<c->layers;l++){
