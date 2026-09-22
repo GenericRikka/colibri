@@ -83,6 +83,13 @@ out_proj and norm, 3.3 the convolution and 2.4 the recurrence -- the matmuls,
 not the recurrence, are what the trunk costs. They are served from VRAM on
 decode (one GEMV each); a prompt batch keeps the batched CPU matmul.
 
+Placed DeltaNet input projections (`dnproj`, qkv ++ z) also run as CUDA
+batches during prefill: at most 256 rows per call, with input/output staging
+bounded to 32 MiB (or one row if that alone is larger). The convolution and
+recurrent state still advance one token at a time. An unavailable or failed
+projection uses the existing per-token CPU path. This changes dispatch count,
+not the recurrent update order; it is not a full GPU DeltaNet implementation.
+
 **Measured, not assumed.** The pricing rule below presumes the GPU answers a
 GEMV faster than the CPU does. Four Tesla M10 (sm_50, no tensor cores, four
 GPUs on one PCIe board) said otherwise in #1652: with every expert

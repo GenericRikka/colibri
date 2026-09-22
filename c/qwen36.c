@@ -2422,6 +2422,14 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
  *   split conv_out -> q_in/k_in/v_in; repeat_interleave q,k by rep; l2norm
  *   (q scaled by 1/sqrt(kdim)); recurrence S[h]*=exp(g); kv=k@S; delta=(v-kv)*beta;
  *   S+=k (x) delta; out=q@S; per-head Gated RMSNorm (plain weight) -> out_proj. */
+/* Bound both the host result block and device input/output staging. */
+static int dnproj_batch_rows(int S, int H, int O) {
+    int64_t rows = (32LL << 20) / (((int64_t)H + O) * sizeof(float));
+    if (rows < 1) rows = 1;
+    if (rows > 256) rows = 256;
+    return S < rows ? S : (int)rows;
+}
+
 static void deltanet(Model *m, Layer *l, int layer, float *x, int S, int pos_base, float *out) {
     (void)pos_base;
     Cfg *c = &m->c;
@@ -2433,12 +2441,12 @@ static void deltanet(Model *m, Layer *l, int layer, float *x, int S, int pos_bas
     float scale = 1.f / sqrtf((float)kdim);
     int H = c->hidden;
 
-    /* qkv and z live in ONE buffer: the fused GPU projection writes
-     * [conv_dim ++ value_dim] in a single GEMV, and the CPU fallback fills the
-     * same two regions. Either way the code below reads qkv/z unchanged. */
-    float *qkvz = falloc((int64_t)conv_dim + value_dim);
-    float *qkv = qkvz;
-    float *z   = qkvz + conv_dim;
+    /* Input projections have no recurrent dependency. Keep qkv ++ z for a
+     * bounded block, then consume rows in order through conv and recurrence. */
+    int proj_dim = conv_dim + value_dim;
+    int B = qt_dnproj_ready(layer) ? dnproj_batch_rows(S, H, proj_dim) : 1;
+    float *qkvz = falloc((int64_t)B * proj_dim);
+    int gpu_block = 0;
     float *b   = falloc(vh);
     float *a   = falloc(vh);
     float *beta= falloc(vh);
@@ -2458,9 +2466,13 @@ static void deltanet(Model *m, Layer *l, int layer, float *x, int S, int pos_bas
         const float *xs = x + (int64_t)s * H;
         extern double g_dn_sub[4];
         double _d0 = tm_now();
-        /* projections (single-token matmuls). One fused GEMV when this layer's
-         * dnproj is placed on a GPU, the two CPU matmuls otherwise. */
-        if (!qt_dnproj_matmul(layer, qkvz, xs, H, conv_dim + value_dim)) {
+        if (s % B == 0) {
+            int rows = S - s < B ? S - s : B;
+            gpu_block = qt_dnproj_matmul_batch(layer, qkvz, xs, rows, H, proj_dim);
+        }
+        float *qkv = qkvz + (int64_t)(s % B) * proj_dim;
+        float *z = qkv + conv_dim;
+        if (!gpu_block) {
             matmul_d(qkv, xs, l->dn_qkv, 1, H, conv_dim);
             matmul_d(z,   xs, l->dn_z,   1, H, value_dim);
         }
