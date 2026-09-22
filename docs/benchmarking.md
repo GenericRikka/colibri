@@ -181,7 +181,7 @@ successful requests divided by the entire batch wall time). Without thresholds,
 this field is null. Failures never qualify, even if they emitted output before
 failing. When a first-output target is set, empty-output successes also do not
 qualify. Missing token usage does not prevent evaluating these latency targets. In
-closed-loop mode the targets start at the HTTP request; fixed-rate mode uses
+closed-loop mode the targets start at the HTTP request; scheduled-arrival mode uses
 the scheduled arrival time and includes client dispatch delay.
 
 This follows the latency-constrained goodput approach used by
@@ -197,7 +197,8 @@ Keep the load model fixed when comparing reports.
 [SGLang's serving benchmark](https://github.com/sgl-project/sglang/blob/main/python/sglang/benchmark/serving.py)
 also supports request-rate-driven arrivals and trace timestamps. This tool uses
 closed-loop concurrency by default; `--request-rate` selects periodic arrivals
-as described below. Neither mode alone establishes a production SLO guarantee;
+by default, or Poisson arrivals with `--arrival-distribution poisson`,
+as described below. None of these modes alone establishes a production SLO guarantee;
 warmup/cache policy, workload representativeness and repeated-run controls still
 matter.
 
@@ -206,7 +207,20 @@ matter.
 Add `--request-rate 5` to schedule five arrivals per second. Request `i` is due at
 `i / rate` seconds from batch start; the first is due immediately. Absolute
 monotonic deadlines prevent accumulated timer drift. This is a deterministic
-periodic schedule, not Poisson traffic or trace replay. Requests are not retried
+periodic schedule. Add `--arrival-distribution poisson --seed 42` for
+independent exponential intervals with mean `1 / rate`. The first request is
+still immediate; subsequent deadlines accumulate sampled intervals. This follows
+the arrival model supported by
+[vLLM](https://docs.vllm.ai/en/latest/cli/bench/serve/#--burstiness) and SGLang;
+it does not reproduce their random-number sequences or implement trace replay.
+The default seed is 0. Equal seeds, rates and request counts reproduce planned
+arrivals independently of warmup and response time, not actual network timing.
+Finite Poisson samples need not realize the configured mean rate. The report
+records the distribution and seed; retain per-request scheduled times for exact
+schedule comparison. Compare identical schedules across servers, then repeat
+with multiple seeds to measure sensitivity to arrival patterns.
+
+Requests are not retried
 or dropped, and the finite workload drains before the report is written.
 
 `--concurrency` still caps simultaneous HTTP requests. Arrivals accumulate in
@@ -216,7 +230,7 @@ Delayed producer wakeups also contribute to dispatch delay; inspect client load
 before attributing all delay to the server. The queue and retained results can
 grow to the workload's total request count, so size workloads accordingly.
 
-Fixed-rate per-request records add:
+Scheduled-arrival per-request records add:
 
 - `scheduled_seconds`: planned arrival relative to batch start;
 - `dispatch_delay_seconds`: actual worker start minus scheduled arrival;

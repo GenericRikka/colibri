@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import random
 from pathlib import Path
 import time
 import urllib.error
@@ -224,15 +225,23 @@ def summarize(results, elapsed, slo_first_output=None, slo_duration=None):
 
 
 def run(url, workload, model, concurrency, repeats, max_tokens, temperature, key, timeout,
-        slo_first_output=None, slo_duration=None, request_rate=None):
+        slo_first_output=None, slo_duration=None, request_rate=None,
+        arrival_distribution="periodic", seed=0):
+    count = len(workload) * repeats
+    scheduled = [0.0] * count
+    if request_rate is not None:
+        rng = random.Random(seed)
+        for index in range(1, count):
+            scheduled[index] = (index / request_rate if arrival_distribution == "periodic"
+                                else scheduled[index - 1] + rng.expovariate(request_rate))
     origin = time.perf_counter()
     # Without a rate, workers immediately take the next request. With a rate,
     # absolute arrival deadlines keep submission independent of response time.
     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
         futures = []
-        for index in range(len(workload) * repeats):
+        for index in range(count):
             if request_rate is not None:
-                delay = origin + index / request_rate - time.perf_counter()
+                delay = origin + scheduled[index] - time.perf_counter()
                 if delay > 0:
                     time.sleep(delay)
             payload = dict(workload[index % len(workload)], model=model, stream=True,
@@ -242,7 +251,7 @@ def run(url, workload, model, concurrency, repeats, max_tokens, temperature, key
         results = [future.result() for future in futures]
     if request_rate is not None:
         for row in results:
-            row["scheduled_seconds"] = row["index"] / request_rate
+            row["scheduled_seconds"] = scheduled[row["index"]]
             wait = max(0.0, row["start_seconds"] - row["scheduled_seconds"])
             row["dispatch_delay_seconds"] = wait
             row["arrival_duration_seconds"] = wait + row["duration_seconds"]
@@ -282,7 +291,10 @@ def main():
     parser.add_argument("--repeats", type=positive_int, default=1)
     parser.add_argument("--warmup-requests", type=nonnegative_int, default=0,
                         help="unmeasured requests before the timed phase (default: 0)")
-    parser.add_argument("--request-rate", type=positive_float, help="fixed scheduled arrivals per second")
+    parser.add_argument("--request-rate", type=positive_float, help="mean scheduled arrivals per second")
+    parser.add_argument("--arrival-distribution", choices=("periodic", "poisson"),
+                        default="periodic", help="arrival intervals when --request-rate is set")
+    parser.add_argument("--seed", type=int, default=0, help="Poisson arrival seed (default: 0)")
     parser.add_argument("--max-tokens", type=positive_int, default=128)
     parser.add_argument("--temperature", type=float, default=0)
     parser.add_argument("--timeout", type=positive_float, default=60, help="socket operation timeout in seconds")
@@ -290,6 +302,8 @@ def main():
     parser.add_argument("--slo-first-output", type=positive_float, help="first output latency target, seconds")
     parser.add_argument("--slo-duration", type=positive_float, help="completed request latency target, seconds")
     args = parser.parse_args()
+    if args.arrival_distribution == "poisson" and args.request_rate is None:
+        parser.error("--arrival-distribution poisson requires --request-rate")
     try:
         url = endpoint(args.base_url)
         workload, digest = load_workload(args.workload)
@@ -310,11 +324,15 @@ def main():
     if warmup is None or warmup["summary"]["failed"] == 0:
         results, summary = run(url, workload, args.model, args.concurrency, args.repeats,
                                args.max_tokens, args.temperature, key, args.timeout,
-                               args.slo_first_output, args.slo_duration, args.request_rate)
+                               args.slo_first_output, args.slo_duration, args.request_rate,
+                               args.arrival_distribution, args.seed)
     report = {"schema_version": 1, "config": {
         "endpoint": url, "model": args.model, "workload_sha256": digest,
         "workload_rows": len(workload), "concurrency": args.concurrency,
-        "load_model": "fixed_rate" if args.request_rate is not None else "closed_loop",
+        "load_model": ("closed_loop" if args.request_rate is None else
+                       "poisson" if args.arrival_distribution == "poisson" else "fixed_rate"),
+        "arrival_distribution": args.arrival_distribution if args.request_rate is not None else None,
+        "arrival_seed": args.seed if args.arrival_distribution == "poisson" else None,
         "request_rate": args.request_rate, "warmup_requests": args.warmup_requests,
         "repeats": args.repeats, "max_tokens": args.max_tokens,
         "temperature": args.temperature, "socket_timeout_seconds": args.timeout,

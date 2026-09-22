@@ -289,6 +289,29 @@ class BenchmarkTest(unittest.TestCase):
                 self.assertEqual(report["summary"]["latency_slo"]["requests_met"], 1 - exit_code)
 
 
+    def test_poisson_cli_reports_seed_and_requires_rate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workload = Path(directory) / "workload.jsonl"
+            output = Path(directory) / "report.json"
+            workload.write_text('{"messages":[{"role":"user","content":"hello"}]}\n')
+            argv = [bench.__file__, "--base-url", self.url.removesuffix("/chat/completions"),
+                    "--model", "fixture", "--workload", str(workload), "--output", str(output),
+                    "--arrival-distribution", "poisson", "--seed", "42"]
+            with patch.object(sys, "argv", argv), patch.object(sys, "stderr", io.StringIO()), \
+                 self.assertRaises(SystemExit) as error:
+                bench.main()
+            self.assertEqual(error.exception.code, 2)
+            self.assertFalse(output.exists())
+            with patch.object(sys, "argv", argv + ["--request-rate", "1000"]), \
+                 patch.object(sys, "stdout", io.StringIO()):
+                self.assertEqual(bench.main(), 0)
+            report = json.loads(output.read_text())
+            self.assertEqual(report["config"]["load_model"], "poisson")
+            self.assertEqual(report["config"]["arrival_distribution"], "poisson")
+            self.assertEqual(report["config"]["arrival_seed"], 42)
+            self.assertEqual(report["requests"][0]["scheduled_seconds"], 0)
+
+
 class ColibriIntegrationTest(unittest.TestCase):
     def test_real_gateway_with_fake_engine(self):
         class Engine:
@@ -337,6 +360,7 @@ class ColibriIntegrationTest(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join()
+
 
 
 class ParsingTest(unittest.TestCase):
@@ -416,6 +440,40 @@ class ParsingTest(unittest.TestCase):
         self.assertAlmostEqual(sleeps[1], .07)
         for row, expected in zip(rows, [0, .11, .21]):
             self.assertAlmostEqual(row["start_seconds"], expected)
+
+    def test_poisson_schedule_is_seeded_and_keeps_backlog_in_slo(self):
+        def measure(seed, service_time):
+            now = [100.0]
+            def submit(_fn, _url, _payload, _key, _timeout, index, origin):
+                future = Future()
+                future.set_result({"index": index, "start_seconds": now[0] - origin,
+                                   "success": True, "first_output_seconds": .01,
+                                   "duration_seconds": .02, "completion_tokens": 1})
+                now[0] += service_time
+                return future
+            def sleep(delay):
+                now[0] += delay
+            with patch.object(bench.time, "perf_counter", side_effect=lambda: now[0]), \
+                 patch.object(bench.time, "sleep", side_effect=sleep), \
+                 patch.object(bench.concurrent.futures, "ThreadPoolExecutor") as executor:
+                executor.return_value.__enter__.return_value.submit.side_effect = submit
+                return bench.run("unused", [{"messages": []}], "fixture", 1, 5, 8, 0, "", 2,
+                                 request_rate=10, arrival_distribution="poisson", seed=seed,
+                                 slo_duration=.1)
+        fast, fast_summary = measure(42, .001)
+        slow, slow_summary = measure(42, 1)
+        other, _ = measure(43, .001)
+        expected = [0, .1020060287274801, .104538912631754, .1367013190392506,
+                    .161959937606262]
+        for row, deadline in zip(fast, expected):
+            self.assertAlmostEqual(row["scheduled_seconds"], deadline)
+        self.assertEqual([r["scheduled_seconds"] for r in fast],
+                         [r["scheduled_seconds"] for r in slow])
+        self.assertNotEqual([r["scheduled_seconds"] for r in fast],
+                            [r["scheduled_seconds"] for r in other])
+        self.assertEqual(fast_summary["latency_slo"]["requests_met"], 5)
+        self.assertEqual(slow_summary["latency_slo"]["requests_met"], 1)
+        self.assertAlmostEqual(slow[1]["arrival_duration_seconds"], 1 - expected[1] + .02)
 
     def test_warmup_time_is_excluded_from_measured_throughput(self):
         now = [0.0]
