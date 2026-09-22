@@ -151,7 +151,8 @@ class BenchmarkTest(unittest.TestCase):
             output = Path(directory) / "report.json"
             workload.write_text(json.dumps(self.workload[0]) + "\n", encoding="utf-8")
             command = [sys.executable, bench.__file__, "--base-url", self.url.rsplit("/", 1)[0],
-                       "--model", "fixture", "--workload", str(workload), "--output", str(output)]
+                       "--model", "fixture", "--workload", str(workload), "--output", str(output),
+                       "--slo-first-output", "5", "--slo-duration", "5"]
             for status, exit_code in ((200, 0), (503, 1)):
                 self.server.status = status
                 completed = subprocess.run(command, capture_output=True, text=True, timeout=10)
@@ -160,6 +161,8 @@ class BenchmarkTest(unittest.TestCase):
                 self.assertEqual(report["summary"]["succeeded"], 1 - exit_code)
                 self.assertEqual(len(report["config"]["workload_sha256"]), 64)
                 self.assertNotIn("messages", report["config"])
+                self.assertEqual(report["config"]["slo_duration_seconds"], 5)
+                self.assertEqual(report["summary"]["latency_slo"]["requests_met"], 1 - exit_code)
 
 
 class ColibriIntegrationTest(unittest.TestCase):
@@ -208,6 +211,28 @@ class ParsingTest(unittest.TestCase):
                 path.write_text(text)
                 with self.assertRaises(ValueError):
                     bench.load_workload(path)
+
+    def test_latency_slo_counts_all_attempts_in_denominator(self):
+        def row(first, duration, success=True):
+            return {"success": success, "first_output_seconds": first,
+                    "duration_seconds": duration, "completion_tokens": None}
+        rows = [row(.5, 2), row(.6, 1), row(.2, 3), row(None, 1), row(.1, 1, False)]
+        summary = bench.summarize(rows, 10, slo_first_output=.5, slo_duration=2)
+        slo = summary["latency_slo"]
+        self.assertEqual(slo["requests_met"], 1)
+        self.assertEqual(slo["fraction_of_attempts"], .2)
+        self.assertEqual(slo["goodput_requests_per_second"], .1)
+        self.assertIsNone(summary["successful_completion_tokens_per_second"])
+        self.assertEqual(bench.summarize(rows, 10, slo_duration=2)["latency_slo"]["requests_met"], 3)
+        self.assertEqual(bench.summarize(rows, 10, slo_first_output=.5)["latency_slo"]["requests_met"], 2)
+        self.assertIsNone(bench.summarize(rows, 10)["latency_slo"])
+
+    def test_latency_slo_no_successes(self):
+        row = {"success": False, "first_output_seconds": .1,
+               "duration_seconds": .2, "completion_tokens": 10}
+        slo = bench.summarize([row], 1, slo_duration=1)["latency_slo"]
+        self.assertEqual(slo["requests_met"], 0)
+        self.assertEqual(slo["goodput_requests_per_second"], 0)
 
     def test_nearest_rank_distribution(self):
         self.assertEqual(bench.distribution(list(range(1, 101)))["p95"], 95)

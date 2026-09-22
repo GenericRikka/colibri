@@ -150,3 +150,32 @@ and run an independent quality check: this tool deliberately does not save
 response text or assess correctness. Retain the workload file with its hash,
 interleave server runs, and report repeated-run spread. Start at concurrency 1,
 then increase it to expose queueing and prefill interference.
+
+### Measure throughput within a latency target
+
+Add `--slo-first-output 1 --slo-duration 15` to require first output within one
+second and protocol completion within fifteen seconds. Either flag can be used
+alone; values are finite positive seconds and the boundary is inclusive.
+`summary.latency_slo` reports the thresholds, `requests_met`, the fraction of
+**all attempts** meeting them, and `goodput_requests_per_second` (qualifying
+successful requests divided by the entire batch wall time). Without thresholds,
+this field is null. Failures never qualify, even if they emitted output before
+failing. When a first-output target is set, empty-output successes also do not
+qualify. Missing token usage does not prevent evaluating these latency targets.
+
+This follows the latency-constrained goodput approach used by
+[vLLM's serving benchmark](https://docs.vllm.ai/en/latest/api/vllm/benchmarks/serve/),
+with the client first-output boundary defined above. It does not assert TPOT or
+per-token SLOs, output quality, a minimum response length, or an equivalent vLLM
+TTFT definition. SLO misses alone do not change the CLI exit status: exit 1 still
+means at least one protocol/transport failure. Record output-length and quality
+controls alongside goodput so short or empty answers cannot masquerade as an
+improvement.
+
+Keep the load model fixed when comparing reports.
+[SGLang's serving benchmark](https://github.com/sgl-project/sglang/blob/main/python/sglang/benchmark/serving.py)
+also supports request-rate-driven arrivals and trace timestamps. This tool still
+uses closed-loop concurrency: slow responses reduce the rate at which new
+requests start. Its goodput cannot establish an open-loop arrival-rate capacity
+or a production SLO guarantee. Rate-controlled arrivals and warmup/cache policy
+remain separate measurement needs.

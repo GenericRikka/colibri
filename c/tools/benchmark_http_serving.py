@@ -143,12 +143,12 @@ def distribution(values):
     return result
 
 
-def summarize(results, elapsed):
+def summarize(results, elapsed, slo_first_output=None, slo_duration=None):
     successful = [row for row in results if row["success"]]
     counted = [row for row in successful if row["completion_tokens"] is not None]
     tokens = sum(row["completion_tokens"] for row in counted)
     complete = bool(successful) and len(counted) == len(successful)
-    return {"requests": len(results), "succeeded": len(successful),
+    summary = {"requests": len(results), "succeeded": len(successful),
             "failed": len(results) - len(successful),
             "failure_rate": (len(results) - len(successful)) / len(results),
             "wall_seconds": elapsed,
@@ -160,8 +160,23 @@ def summarize(results, elapsed):
             "successful_first_output_seconds": distribution([
                 r["first_output_seconds"] for r in successful if r["first_output_seconds"] is not None])}
 
+    summary["latency_slo"] = None
+    if slo_first_output is not None or slo_duration is not None:
+        met = sum(
+            (slo_duration is None or row["duration_seconds"] <= slo_duration)
+            and (slo_first_output is None or (
+                row["first_output_seconds"] is not None
+                and row["first_output_seconds"] <= slo_first_output))
+            for row in successful)
+        summary["latency_slo"] = {
+            "first_output_seconds": slo_first_output, "duration_seconds": slo_duration,
+            "requests_met": met, "fraction_of_attempts": met / len(results),
+            "goodput_requests_per_second": met / elapsed}
+    return summary
 
-def run(url, workload, model, concurrency, repeats, max_tokens, temperature, key, timeout):
+
+def run(url, workload, model, concurrency, repeats, max_tokens, temperature, key, timeout,
+        slo_first_output=None, slo_duration=None):
     origin = time.perf_counter()
     # Workers take the next request as soon as the previous stream ends. Timers
     # begin inside workers, excluding time waiting in the local executor queue.
@@ -173,7 +188,7 @@ def run(url, workload, model, concurrency, repeats, max_tokens, temperature, key
                            temperature=temperature, n=1)
             futures.append(pool.submit(request_one, url, payload, key, timeout, index, origin))
         results = [future.result() for future in futures]
-    return results, summarize(results, time.perf_counter() - origin)
+    return results, summarize(results, time.perf_counter() - origin, slo_first_output, slo_duration)
 
 
 def positive_int(value):
@@ -202,6 +217,8 @@ def main():
     parser.add_argument("--temperature", type=float, default=0)
     parser.add_argument("--timeout", type=positive_float, default=60, help="socket operation timeout in seconds")
     parser.add_argument("--api-key-env", default="OPENAI_API_KEY")
+    parser.add_argument("--slo-first-output", type=positive_float, help="first output latency target, seconds")
+    parser.add_argument("--slo-duration", type=positive_float, help="completed request latency target, seconds")
     args = parser.parse_args()
     try:
         url = endpoint(args.base_url)
@@ -214,12 +231,14 @@ def main():
         parser.error(str(exc))
     results, summary = run(url, workload, args.model, args.concurrency, args.repeats,
                            args.max_tokens, args.temperature,
-                           os.environ.get(args.api_key_env, ""), args.timeout)
+                           os.environ.get(args.api_key_env, ""), args.timeout,
+                           args.slo_first_output, args.slo_duration)
     report = {"schema_version": 1, "config": {
         "endpoint": url, "model": args.model, "workload_sha256": digest,
         "workload_rows": len(workload), "concurrency": args.concurrency,
         "repeats": args.repeats, "max_tokens": args.max_tokens,
         "temperature": args.temperature, "socket_timeout_seconds": args.timeout,
+        "slo_first_output_seconds": args.slo_first_output, "slo_duration_seconds": args.slo_duration,
         "stream": True, "include_usage": True, "n": 1},
         "summary": summary, "requests": results}
     Path(args.output).write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
