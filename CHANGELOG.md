@@ -3,9 +3,9 @@
 All notable changes to colibrì are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [1.12.1] — 2026-09-21
+## [1.12.1] — 2026-09-22
 
-30 pull requests since v1.12.0, 22 of them from contributors. Two tokenizers
+32 pull requests since v1.12.0, 22 of them from contributors. Two tokenizers
 brought back to the reference, brio on the ninth engine, `coli chat` working
 again at the default context on two families, and a placement decision that
 is now measured on the card in front of it instead of predicted.
