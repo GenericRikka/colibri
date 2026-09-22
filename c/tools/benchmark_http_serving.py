@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded, closed-loop OpenAI chat streaming benchmark (stdlib only)."""
+"""OpenAI chat streaming benchmark with bounded concurrency (stdlib only)."""
 import argparse
 import concurrent.futures
 import hashlib
@@ -160,15 +160,26 @@ def summarize(results, elapsed, slo_first_output=None, slo_duration=None):
             "successful_first_output_seconds": distribution([
                 r["first_output_seconds"] for r in successful if r["first_output_seconds"] is not None])}
 
+    paced = all(row.get("scheduled_seconds") is not None for row in results)
+    summary["arrival_timing"] = None
+    if paced:
+        summary["arrival_timing"] = {
+            "dispatch_delay_seconds": distribution([r["dispatch_delay_seconds"] for r in results]),
+            "successful_duration_seconds": distribution([r["arrival_duration_seconds"] for r in successful]),
+            "successful_first_output_seconds": distribution([
+                r["arrival_first_output_seconds"] for r in successful
+                if r["arrival_first_output_seconds"] is not None])}
+    prefix = "arrival_" if paced else ""
     summary["latency_slo"] = None
     if slo_first_output is not None or slo_duration is not None:
         met = sum(
-            (slo_duration is None or row["duration_seconds"] <= slo_duration)
+            (slo_duration is None or row[prefix + "duration_seconds"] <= slo_duration)
             and (slo_first_output is None or (
-                row["first_output_seconds"] is not None
-                and row["first_output_seconds"] <= slo_first_output))
+                row[prefix + "first_output_seconds"] is not None
+                and row[prefix + "first_output_seconds"] <= slo_first_output))
             for row in successful)
         summary["latency_slo"] = {
+            "timing_basis": "scheduled_arrival" if paced else "request_start",
             "first_output_seconds": slo_first_output, "duration_seconds": slo_duration,
             "requests_met": met, "fraction_of_attempts": met / len(results),
             "goodput_requests_per_second": met / elapsed}
@@ -176,18 +187,30 @@ def summarize(results, elapsed, slo_first_output=None, slo_duration=None):
 
 
 def run(url, workload, model, concurrency, repeats, max_tokens, temperature, key, timeout,
-        slo_first_output=None, slo_duration=None):
+        slo_first_output=None, slo_duration=None, request_rate=None):
     origin = time.perf_counter()
-    # Workers take the next request as soon as the previous stream ends. Timers
-    # begin inside workers, excluding time waiting in the local executor queue.
+    # Without a rate, workers immediately take the next request. With a rate,
+    # absolute arrival deadlines keep submission independent of response time.
     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
         futures = []
         for index in range(len(workload) * repeats):
+            if request_rate is not None:
+                delay = origin + index / request_rate - time.perf_counter()
+                if delay > 0:
+                    time.sleep(delay)
             payload = dict(workload[index % len(workload)], model=model, stream=True,
                            stream_options={"include_usage": True}, max_tokens=max_tokens,
                            temperature=temperature, n=1)
             futures.append(pool.submit(request_one, url, payload, key, timeout, index, origin))
         results = [future.result() for future in futures]
+    if request_rate is not None:
+        for row in results:
+            row["scheduled_seconds"] = row["index"] / request_rate
+            wait = max(0.0, row["start_seconds"] - row["scheduled_seconds"])
+            row["dispatch_delay_seconds"] = wait
+            row["arrival_duration_seconds"] = wait + row["duration_seconds"]
+            first = row["first_output_seconds"]
+            row["arrival_first_output_seconds"] = None if first is None else wait + first
     return results, summarize(results, time.perf_counter() - origin, slo_first_output, slo_duration)
 
 
@@ -213,6 +236,7 @@ def main():
     parser.add_argument("--output", required=True, help="JSON report path")
     parser.add_argument("--concurrency", type=positive_int, default=1)
     parser.add_argument("--repeats", type=positive_int, default=1)
+    parser.add_argument("--request-rate", type=positive_float, help="fixed scheduled arrivals per second")
     parser.add_argument("--max-tokens", type=positive_int, default=128)
     parser.add_argument("--temperature", type=float, default=0)
     parser.add_argument("--timeout", type=positive_float, default=60, help="socket operation timeout in seconds")
@@ -232,10 +256,12 @@ def main():
     results, summary = run(url, workload, args.model, args.concurrency, args.repeats,
                            args.max_tokens, args.temperature,
                            os.environ.get(args.api_key_env, ""), args.timeout,
-                           args.slo_first_output, args.slo_duration)
+                           args.slo_first_output, args.slo_duration, args.request_rate)
     report = {"schema_version": 1, "config": {
         "endpoint": url, "model": args.model, "workload_sha256": digest,
         "workload_rows": len(workload), "concurrency": args.concurrency,
+        "load_model": "fixed_rate" if args.request_rate is not None else "closed_loop",
+        "request_rate": args.request_rate,
         "repeats": args.repeats, "max_tokens": args.max_tokens,
         "temperature": args.temperature, "socket_timeout_seconds": args.timeout,
         "slo_first_output_seconds": args.slo_first_output, "slo_duration_seconds": args.slo_duration,

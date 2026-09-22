@@ -120,9 +120,9 @@ observed output/usage.
 
 Measurement boundaries:
 
-- Concurrency is closed-loop: at most that many requests are in flight, and each
-  worker starts its next request after its previous stream ends. There is no
-  arrival-rate model, warmup, automatic retry, or cache flush. Repeats reuse the
+- Without `--request-rate`, concurrency is closed-loop: at most that many
+  requests are in flight, and each worker starts its next request after its
+  previous stream ends. There is no warmup, automatic retry, or cache flush. Repeats reuse the
   conversations in file order; prefix caching and scheduling can affect results.
 - Request timing begins inside the worker, before HTTP connection setup, and
   excludes waiting for a local worker. Each request uses a new connection.
@@ -156,12 +156,14 @@ then increase it to expose queueing and prefill interference.
 Add `--slo-first-output 1 --slo-duration 15` to require first output within one
 second and protocol completion within fifteen seconds. Either flag can be used
 alone; values are finite positive seconds and the boundary is inclusive.
-`summary.latency_slo` reports the thresholds, `requests_met`, the fraction of
+`summary.latency_slo` reports the thresholds, timing basis, `requests_met`, the fraction of
 **all attempts** meeting them, and `goodput_requests_per_second` (qualifying
 successful requests divided by the entire batch wall time). Without thresholds,
 this field is null. Failures never qualify, even if they emitted output before
 failing. When a first-output target is set, empty-output successes also do not
-qualify. Missing token usage does not prevent evaluating these latency targets.
+qualify. Missing token usage does not prevent evaluating these latency targets. In
+closed-loop mode the targets start at the HTTP request; fixed-rate mode uses
+the scheduled arrival time and includes client dispatch delay.
 
 This follows the latency-constrained goodput approach used by
 [vLLM's serving benchmark](https://docs.vllm.ai/en/latest/api/vllm/benchmarks/serve/),
@@ -174,8 +176,41 @@ improvement.
 
 Keep the load model fixed when comparing reports.
 [SGLang's serving benchmark](https://github.com/sgl-project/sglang/blob/main/python/sglang/benchmark/serving.py)
-also supports request-rate-driven arrivals and trace timestamps. This tool still
-uses closed-loop concurrency: slow responses reduce the rate at which new
-requests start. Its goodput cannot establish an open-loop arrival-rate capacity
-or a production SLO guarantee. Rate-controlled arrivals and warmup/cache policy
-remain separate measurement needs.
+also supports request-rate-driven arrivals and trace timestamps. This tool uses
+closed-loop concurrency by default; `--request-rate` selects periodic arrivals
+as described below. Neither mode alone establishes a production SLO guarantee;
+warmup/cache policy, workload representativeness and repeated-run controls still
+matter.
+
+### Schedule arrivals independently of response time
+
+Add `--request-rate 5` to schedule five arrivals per second. Request `i` is due at
+`i / rate` seconds from batch start; the first is due immediately. Absolute
+monotonic deadlines prevent accumulated timer drift. This is a deterministic
+periodic schedule, not Poisson traffic or trace replay. Requests are not retried
+or dropped, and the finite workload drains before the report is written.
+
+`--concurrency` still caps simultaneous HTTP requests. Arrivals accumulate in
+the client's executor queue when all workers are busy. Therefore the configured
+rate is **scheduled arrivals, not guaranteed wire or server arrival rate**.
+Delayed producer wakeups also contribute to dispatch delay; inspect client load
+before attributing all delay to the server. The queue and retained results can
+grow to the workload's total request count, so size workloads accordingly.
+
+Fixed-rate per-request records add:
+
+- `scheduled_seconds`: planned arrival relative to batch start;
+- `dispatch_delay_seconds`: actual worker start minus scheduled arrival;
+- `arrival_first_output_seconds`: dispatch delay plus HTTP first-output latency,
+  or null if no output was observed;
+- `arrival_duration_seconds`: dispatch delay plus HTTP request duration.
+
+`summary.arrival_timing` reports dispatch-delay samples for all attempts and
+arrival-based latency samples for successes. Existing HTTP timing fields retain
+their original meaning. With a rate set, SLO evaluation uses arrival-based times
+and records `timing_basis: scheduled_arrival`; without one it records
+`request_start`. This prevents a request waiting two seconds for a worker and
+then completing in 100 ms from meeting a one-second total-latency target.
+Goodput still divides qualifying completions by the entire batch wall time,
+including the drain after the last scheduled arrival. Keep rate, concurrency,
+request count, latency targets and timing basis equal across compared reports.

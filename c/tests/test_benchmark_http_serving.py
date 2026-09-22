@@ -8,6 +8,8 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
+from concurrent.futures import Future
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from tools import benchmark_http_serving as bench
 from openai_server import APIServer
@@ -42,6 +44,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.server.barrier:
                 self.server.barrier.wait(timeout=5)
+            time.sleep(self.server.delay)
             self.send_response(self.server.status)
             self.send_header("Content-Type", self.server.content_type)
             if self.server.status == 302:
@@ -63,6 +66,7 @@ class BenchmarkTest(unittest.TestCase):
         self.server.content_type = "text/event-stream"
         self.server.body = stream({"content": "hello"})
         self.server.barrier = None
+        self.server.delay = 0
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": .01})
         self.thread.start()
         self.url = f"http://127.0.0.1:{self.server.server_port}/v1/chat/completions"
@@ -145,6 +149,21 @@ class BenchmarkTest(unittest.TestCase):
                                        stream_options={"include_usage": True}, max_tokens=8,
                                        temperature=0, n=1))
 
+    def test_fixed_rate_keeps_client_wait_visible(self):
+        self.server.delay = .04
+        rows, summary = bench.run(self.url, self.workload, "fixture", 1, 3, 8, 0, "", 2,
+                                  request_rate=1000)
+        self.assertEqual(summary["succeeded"], 3)
+        self.assertEqual(self.server.peak, 1)
+        self.assertEqual([r["scheduled_seconds"] for r in rows], [0, .001, .002])
+        self.assertGreater(rows[-1]["dispatch_delay_seconds"], .05)
+        for row in rows:
+            self.assertAlmostEqual(row["arrival_duration_seconds"],
+                                   row["duration_seconds"] + row["dispatch_delay_seconds"])
+            self.assertAlmostEqual(row["arrival_first_output_seconds"],
+                                   row["first_output_seconds"] + row["dispatch_delay_seconds"])
+        self.assertEqual(summary["arrival_timing"]["dispatch_delay_seconds"]["count"], 3)
+
     def test_cli_report_and_failure_exit(self):
         with tempfile.TemporaryDirectory() as directory:
             workload = Path(directory) / "prompts.jsonl"
@@ -152,7 +171,7 @@ class BenchmarkTest(unittest.TestCase):
             workload.write_text(json.dumps(self.workload[0]) + "\n", encoding="utf-8")
             command = [sys.executable, bench.__file__, "--base-url", self.url.rsplit("/", 1)[0],
                        "--model", "fixture", "--workload", str(workload), "--output", str(output),
-                       "--slo-first-output", "5", "--slo-duration", "5"]
+                       "--slo-first-output", "5", "--slo-duration", "5", "--request-rate", "10"]
             for status, exit_code in ((200, 0), (503, 1)):
                 self.server.status = status
                 completed = subprocess.run(command, capture_output=True, text=True, timeout=10)
@@ -162,6 +181,9 @@ class BenchmarkTest(unittest.TestCase):
                 self.assertEqual(len(report["config"]["workload_sha256"]), 64)
                 self.assertNotIn("messages", report["config"])
                 self.assertEqual(report["config"]["slo_duration_seconds"], 5)
+                self.assertEqual(report["config"]["load_model"], "fixed_rate")
+                self.assertEqual(report["config"]["request_rate"], 10)
+                self.assertEqual(report["summary"]["latency_slo"]["timing_basis"], "scheduled_arrival")
                 self.assertEqual(report["summary"]["latency_slo"]["requests_met"], 1 - exit_code)
 
 
@@ -233,6 +255,47 @@ class ParsingTest(unittest.TestCase):
         slo = bench.summarize([row], 1, slo_duration=1)["latency_slo"]
         self.assertEqual(slo["requests_met"], 0)
         self.assertEqual(slo["goodput_requests_per_second"], 0)
+
+    def test_fixed_rate_slo_includes_client_backlog(self):
+        row = {"success": True, "first_output_seconds": .1, "duration_seconds": .2,
+               "completion_tokens": None, "scheduled_seconds": 0,
+               "dispatch_delay_seconds": 2, "arrival_first_output_seconds": 2.1,
+               "arrival_duration_seconds": 2.2}
+        summary = bench.summarize([row], 3, slo_first_output=1, slo_duration=1)
+        self.assertEqual(summary["latency_slo"]["requests_met"], 0)
+        self.assertEqual(summary["latency_slo"]["timing_basis"], "scheduled_arrival")
+        row.update(success=False, arrival_first_output_seconds=None)
+        self.assertEqual(bench.summarize([row], 3)["arrival_timing"]["successful_first_output_seconds"]["count"], 0)
+
+    def test_arrival_schedule_uses_absolute_deadlines(self):
+        now = [100.0]
+        sleeps = []
+        def sleep(delay):
+            sleeps.append(delay)
+            now[0] += delay + .01  # deterministic late wakeup
+        def submit(_fn, _url, _payload, _key, _timeout, index, origin):
+            future = Future()
+            future.set_result({"index": index, "start_seconds": now[0] - origin,
+                               "success": True, "first_output_seconds": .01,
+                               "duration_seconds": .02, "completion_tokens": 1})
+            now[0] += .02
+            return future
+        with patch.object(bench.time, "perf_counter", side_effect=lambda: now[0]), \
+             patch.object(bench.time, "sleep", side_effect=sleep), \
+             patch.object(bench.concurrent.futures, "ThreadPoolExecutor") as executor:
+            executor.return_value.__enter__.return_value.submit.side_effect = submit
+            rows, _ = bench.run("unused", [{"messages": []}], "fixture", 1, 3, 8, 0, "", 2,
+                                request_rate=10)
+        self.assertEqual(len(sleeps), 2)
+        self.assertAlmostEqual(sleeps[0], .08)
+        self.assertAlmostEqual(sleeps[1], .07)
+        for row, expected in zip(rows, [0, .11, .21]):
+            self.assertAlmostEqual(row["start_seconds"], expected)
+
+    def test_request_rate_must_be_positive_and_finite(self):
+        for value in ("0", "-1", "nan", "inf"):
+            with self.subTest(value=value), self.assertRaises(bench.argparse.ArgumentTypeError):
+                bench.positive_float(value)
 
     def test_nearest_rank_distribution(self):
         self.assertEqual(bench.distribution(list(range(1, 101)))["p95"], 95)
