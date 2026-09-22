@@ -2892,7 +2892,7 @@ def model_arch(model):
     return resolve_model(model).descriptor.id
 
 
-def cap_for_arch(arch, cap, env=None):
+def cap_for_arch(arch, cap, env=None, model=None):
     """Cap-sentinel shim (#379): CURRENT-STATE CALIBRATION, not durable core.
 
     An absent cap (None) means different things across today's engines --
@@ -2931,6 +2931,22 @@ def cap_for_arch(arch, cap, env=None):
             planned = 0
         if planned >= 1:
             return planned
+    if arch == "deepseek_v41" and model is not None:
+        # V4.1 only reads its argv cap, not RAM_GB. Without --auto-tier the
+        # legacy eight slots silently discarded both --ram and RAM_GB (#1666).
+        from resource_plan import build_plan
+        settings = env if env is not None else os.environ
+        ram = settings.get("RAM_GB", "0")
+        limits = family_by_id(arch).limits
+        plan = build_plan(model, ram_gb=0 if ram == "auto" else float(ram),
+                          context=int(settings.get(limits.context_env, limits.default_context)),
+                          gpu_indices=[])
+        slots = plan["tiers"]["ram"]["cache_slots_per_layer"]
+        if slots < 1:
+            raise ValueError("DeepSeek V4.1 RAM budget cannot hold one expert slot per layer")
+        print(f"[v41] RAM plan: {slots} expert cache slots/layer; --cap overrides",
+              file=sys.stderr)
+        return slots
     return family_by_id(arch).limits.implicit_cap
 
 
@@ -3071,7 +3087,7 @@ class Engine:
         child_env = dict(env or os.environ, SNAP=str(model), SERVE="1", SERVE_BATCH="1",
                          NGEN=str(max_tokens), KV_SLOTS=str(kv_slots))
         tune_child_env(child_env, arch)
-        resolved_cap = cap_for_arch(arch, cap, child_env)
+        resolved_cap = cap_for_arch(arch, cap, child_env, model=model)
         child_env.pop("COLI_PROFILE_CAP", None)
         child_env.pop("COLI_PLAN_CAP", None)
         self.process = subprocess.Popen(
