@@ -116,6 +116,13 @@ static void one_case(const char *what, int S, int I, int O, int fixed_exp) {
     }
 
     compare_case(what, y_cpu, y_gpu, S, I, O);
+    /* The engine recycles host slots: identical addresses must upload fresh
+     * bytes and scales, even when device scratch already has enough capacity. */
+    memset(q4, 0x22, (size_t)O * rb);
+    memset(e8, 127, (size_t)O * ng);
+    mxfp4_ref(y_cpu, x, q4, e8, S, I, O);
+    if (!coli_cuda_matmul_mxfp4(y_gpu, x, q4, e8, S, I, O)) fails++;
+    else compare_case("recycled host slot", y_cpu, y_gpu, S, I, O);
 done:
     free(q4); free(e8); free(x); free(y_cpu); free(y_gpu);
 }
@@ -230,6 +237,13 @@ int main(void) {
     mixed_rows_255();
     mixed_254_255();
     one_case("exponent 127 -> unit scale", 1,   64,   16, 127);
+
+    coli_cuda_shutdown();
+    if (!coli_cuda_init(&dev0, 1)) fails++;
+    else {
+        one_case("after shutdown/reinit", 2, 128, 32, 127);
+        coli_cuda_shutdown();
+    }
 
     printf(fails ? "test_mxfp4_cuda: %d failure(s)\n" : "test_mxfp4_cuda: ok\n", fails);
     return fails != 0;

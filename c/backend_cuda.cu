@@ -82,6 +82,9 @@ typedef struct {
     int compute_major,compute_minor;
     float *x, *y, *gate, *up;
     size_t x_cap, y_cap, gate_cap, up_cap;
+    /* Streaming MXFP4 weights are refreshed on every call; only storage is reused. */
+    void *mxfp4_weights, *mxfp4_scales;
+    size_t mxfp4_weights_cap, mxfp4_scales_cap;
     /* Staging of the resident dense matvec (coli_cuda_matmul), apart from
      * x/y: the expert group (coli_cuda_expert_group_issue) runs on ctx->stream
      * asynchronously while the engine's thread keeps computing -- qwen38's
@@ -1288,6 +1291,8 @@ extern "C" void coli_cuda_shutdown(void) {
     for (int i = 0; i < g_nctx; i++) {
         DeviceContext *ctx = &g_ctx[i];
         if (!select_ctx(ctx)) continue;
+        if (ctx->mxfp4_weights) cudaFree(ctx->mxfp4_weights);
+        if (ctx->mxfp4_scales) cudaFree(ctx->mxfp4_scales);
         if (ctx->x) cudaFree(ctx->x);
         if (ctx->y) cudaFree(ctx->y);
         if (ctx->dx) cudaFree(ctx->dx);
@@ -1312,6 +1317,8 @@ extern "C" void coli_cuda_shutdown(void) {
         ctx->ans_scratch=nullptr;ctx->ans_chunks=nullptr;ctx->ans_raw=nullptr;ctx->ans_raw_cap=0;
         ctx->ans_host=nullptr;ctx->ans_host_cap=0;ctx->ans_copy_pending=0;
 #endif
+        ctx->mxfp4_weights = ctx->mxfp4_scales = nullptr;
+        ctx->mxfp4_weights_cap = ctx->mxfp4_scales_cap = 0;
         ctx->x = ctx->y = ctx->gate = ctx->up = nullptr;
         ctx->dx = ctx->dy = nullptr; ctx->dx_cap = ctx->dy_cap = 0;
         ctx->qx=nullptr; ctx->qscale=nullptr;
@@ -1728,9 +1735,10 @@ extern "C" int coli_cuda_matmul_mxfp4(float *y, const float *x,
     size_t wb = (size_t)O * rb, sb = (size_t)O * ng;
     size_t xb = (size_t)S * I * sizeof(float), yb = (size_t)S * O * sizeof(float);
 
-    uint8_t *dw = nullptr, *ds = nullptr;
-    if (!cuda_ok(cudaMalloc(&dw, wb), "mxfp4 weight alloc")) return 0;
-    if (!cuda_ok(cudaMalloc(&ds, sb), "mxfp4 scale alloc")) { cudaFree(dw); return 0; }
+    if (!reserve_bytes(&ctx->mxfp4_weights, &ctx->mxfp4_weights_cap, wb) ||
+        !reserve_bytes(&ctx->mxfp4_scales, &ctx->mxfp4_scales_cap, sb)) return 0;
+    uint8_t *dw = static_cast<uint8_t *>(ctx->mxfp4_weights);
+    uint8_t *ds = static_cast<uint8_t *>(ctx->mxfp4_scales);
 
     int ok = reserve(&ctx->x, &ctx->x_cap, xb) && reserve(&ctx->y, &ctx->y_cap, yb) &&
              cuda_ok(cudaMemcpy(dw, q4, wb, cudaMemcpyHostToDevice), "mxfp4 weight upload") &&
@@ -1743,8 +1751,6 @@ extern "C" int coli_cuda_matmul_mxfp4(float *y, const float *x,
         ok = cuda_ok(cudaGetLastError(), "mxfp4 launch") &&
              cuda_ok(cudaMemcpy(y, ctx->y, yb, cudaMemcpyDeviceToHost), "mxfp4 output download");
     }
-    cudaFree(dw);
-    cudaFree(ds);
     return ok;
 }
 
