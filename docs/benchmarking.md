@@ -133,9 +133,13 @@ Measurement boundaries:
   do not count. This is client-visible first output latency, not necessarily
   time to a visible answer or to exactly one token. Empty successful output
   has no first-output sample. SSE chunk gaps are not reported as token latency.
-- Success requires both a finish reason and `[DONE]`. HTTP errors, stream errors,
-  malformed responses, and incomplete streams are failures. This establishes
-  protocol completion, not output correctness.
+- Success requires a supported finish reason (`stop`, `length`, `tool_calls`,
+  `function_call`, or `content_filter`) and `[DONE]`. Error/unknown finish reasons,
+  HTTP errors, stream errors, malformed responses, and incomplete streams fail.
+  With `n=1`, each nonempty choices array must contain exactly one choice with
+  integer index 0. Output text and tool-function fields must be strings or null.
+  This establishes protocol completion, not output correctness; filtered or
+  length-limited output can still count as protocol success.
 - Token counts come only from `usage.completion_tokens`. Successful completion
   token throughput divides those counts by the **entire batch wall time**,
   including failed attempts. It is null if any successful request lacks usage

@@ -109,6 +109,34 @@ class BenchmarkTest(unittest.TestCase):
                 self.assertIsNotNone(row["error"])
                 self.assertNotIn("private diagnostic", json.dumps(row))
 
+    def test_invalid_choices_do_not_count_as_success(self):
+        choices = [
+            [{"index": 0, "delta": {"content": 123}, "finish_reason": "stop"}],
+            [{"index": 0, "delta": {"content": "ok", "reasoning": []}, "finish_reason": "stop"}],
+            [{"index": 0, "delta": {}, "finish_reason": False}],
+            [{"index": 0, "delta": {}, "finish_reason": ""}],
+            [{"index": 0, "delta": {}, "finish_reason": "error"}],
+            [{"index": False, "delta": {}, "finish_reason": "stop"}],
+            [{"delta": {}, "finish_reason": "stop"}],
+            [{"index": 0, "delta": {}, "finish_reason": "stop"}] * 2,
+            [{"index": 0, "delta": {"tool_calls": [{"function": {"arguments": 7}}]}, "finish_reason": "tool_calls"}],
+        ]
+        for malformed in choices:
+            with self.subTest(choices=malformed):
+                self.server.body = (event({"choices": malformed}) + event("[DONE]")).encode()
+                row = self.request()
+                self.assertFalse(row["success"], row)
+                self.assertEqual(bench.summarize([row], 1, slo_duration=1)["latency_slo"]["requests_met"], 0)
+
+    def test_supported_finish_reasons_and_null_delta(self):
+        for finish in ("stop", "length", "tool_calls", "function_call", "content_filter"):
+            with self.subTest(finish=finish):
+                self.server.body = (event({"choices": [{"index": 0, "delta": None,
+                                                       "finish_reason": finish}]}) + event("[DONE]")).encode()
+                row = self.request()
+                self.assertTrue(row["success"], row)
+                self.assertIsNone(row["first_output_seconds"])
+
     def test_http_errors_and_redirects(self):
         for status in (429, 500, 302):
             self.server.status = status

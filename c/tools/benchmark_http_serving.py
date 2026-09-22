@@ -69,14 +69,34 @@ def sse_events(response):
             data.append(value[1:] if value.startswith(" ") else value)
 
 
+def nonempty_text(value):
+    if value is not None and not isinstance(value, str):
+        raise StreamError("invalid_output_text")
+    return bool(value)
+
+
 def has_output(delta):
-    if delta.get("content") or delta.get("reasoning_content") or delta.get("reasoning"):
-        return True
-    for tool in delta.get("tool_calls") or []:
-        function = tool.get("function") or {}
-        if function.get("name") or function.get("arguments"):
-            return True
-    return False
+    if not isinstance(delta, dict):
+        raise StreamError("invalid_delta")
+    output = False
+    for field in ("content", "reasoning_content", "reasoning"):
+        output |= nonempty_text(delta.get(field))
+    calls = delta.get("tool_calls")
+    if calls is None:
+        return output
+    if not isinstance(calls, list):
+        raise StreamError("invalid_tool_calls")
+    for tool in calls:
+        if not isinstance(tool, dict):
+            raise StreamError("invalid_tool_call")
+        function = tool.get("function")
+        if function is None:
+            continue
+        if not isinstance(function, dict):
+            raise StreamError("invalid_tool_function")
+        for field in ("name", "arguments"):
+            output |= nonempty_text(function.get(field))
+    return output
 
 
 def request_one(url, payload, key, timeout, index, origin):
@@ -101,18 +121,30 @@ def request_one(url, payload, key, timeout, index, origin):
                     done = True
                     break
                 chunk = json.loads(event)
+                if not isinstance(chunk, dict):
+                    raise StreamError("invalid_chunk")
                 if "error" in chunk:
                     raise StreamError("stream_error")
-                for choice in chunk.get("choices", []):
-                    if choice.get("index", 0) != 0:
+                choices = chunk.get("choices", [])
+                if not isinstance(choices, list) or len(choices) > 1:
+                    raise StreamError("invalid_choices")
+                for choice in choices:
+                    if (not isinstance(choice, dict) or type(choice.get("index")) is not int
+                            or choice["index"] != 0):
                         raise StreamError("unexpected_choice")
-                    if has_output(choice.get("delta") or {}):
+                    delta = choice.get("delta")
+                    if has_output({} if delta is None else delta):
                         if result["first_output_seconds"] is None:
                             result["first_output_seconds"] = time.perf_counter() - start
-                    if choice.get("finish_reason") is not None:
-                        result["finish_reason"] = choice["finish_reason"]
+                    finish = choice.get("finish_reason")
+                    if finish is not None:
+                        if finish not in ("stop", "length", "tool_calls", "function_call", "content_filter"):
+                            raise StreamError("unsuccessful_finish_reason")
+                        result["finish_reason"] = finish
                 usage = chunk.get("usage")
                 if usage is not None:
+                    if not isinstance(usage, dict):
+                        raise StreamError("invalid_usage")
                     tokens = usage.get("completion_tokens")
                     if type(tokens) is not int or tokens < 0:
                         raise StreamError("invalid_completion_tokens")
