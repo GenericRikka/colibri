@@ -5,7 +5,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [1.12.1] — 2026-09-22
 
-32 pull requests since v1.12.0, 22 of them from contributors. Two tokenizers
+34 pull requests since v1.12.0, 23 of them from contributors. Two tokenizers
 brought back to the reference, brio on the ninth engine, `coli chat` working
 again at the default context on two families, and a placement decision that
 is now measured on the card in front of it instead of predicted.
@@ -68,7 +68,7 @@ is now measured on the card in front of it instead of predicted.
 
 ### Performance
 
-- **#PR**: qwen36's dense trunk and routed experts multiply with integer
+- **#1664**: qwen36's dense trunk and routed experts multiply with integer
   dot products. The activation is quantized to int8 once per call and the
   weights, int8 rows or int4 planar blocks, meet it with maddubs / vpdpbusd
   instead of a float conversion per weight; the integer kernels move from
@@ -80,6 +80,18 @@ is now measured on the card in front of it instead of predicted.
   `COLI_DENSE_INT4=<components>` stores part of the trunk as int4 in blocks
   of 64: opt-in, with the perplexity it costs per component in the docs
   (lm_head alone +2.4%, everything +10%).
+- **#1668**: qwen38's dense trunk (553 matrices, 3.6 G weights, 8 GiB of
+  BF16 read on every token, more than the ten routed experts) is kept on the
+  CPU as int8 rows with the BF16 copy released, and multiplied with the same
+  integer kernels; the routed experts' e4m3 blocks are decoded eight at a
+  time in registers and multiplied with FMA instead of one table lookup per
+  weight. Measured on the released Qwen3.8-Flash-Next-FP8, 8 threads, RAM
+  LRU 96 per layer: decode 0.61 to 1.42 tok/s, the trunk 434 to 85 ms/token,
+  lm_head 76 to 13, the expert GEMVs 388 to 140, peak RSS 32.2 to 28.5 GB;
+  prefill of 512 tokens 495 to 149 s. Perplexity on 4 x 512 tokens +0.5%
+  (two chunks lower, two higher); the vector FP8 kernel alone reproduces the
+  BF16 run to four decimals. Both are the default (`Q38_TRUNK_CPU_INT8=0`
+  keeps the BF16 trunk, `Q38_FP8_KERNEL=scalar` the table kernel).
 
 ### Performance, from contributors
 
@@ -99,6 +111,12 @@ is now measured on the card in front of it instead of predicted.
 
 ### Fixed
 
+- **#1650** (bokiko): a Qwen3.8 pin snapshots the recurrent and PLE state
+  but reuses the live attention and indexer rows; after an unrelated prompt
+  overwrote those rows, returning to the pin could change brio logprobs
+  without a warning. The engine now records the token identity of the live
+  rows (`kv_prefix.h`) and refuses a stale pin or prefix restore; image rows
+  are tainted. Wire regressions run on the BF16 and FP8 fixtures.
 - **#1626**: `SNAP` is the model directory for every non-GLM engine, so
   `coli run` stops handing them a leftover environment (#1600).
 - **#1604**: glm53 honours `Mat.resident` in the Vulkan gate and frees the
