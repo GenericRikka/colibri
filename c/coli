@@ -53,7 +53,10 @@ if sys.platform == "win32":
         try: s.reconfigure(encoding="utf-8")
         except (AttributeError, OSError): pass
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+# realpath, not abspath: on a merged-/usr system /bin and /sbin are symlinks
+# to /usr/bin, and an installed launcher invoked as /bin/coli would otherwise
+# derive /libexec/colibri instead of /usr/libexec/colibri (#1689).
+HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
 # version.py sits next to this script in a source checkout, but an installed
 # layout puts the launcher in $(PREFIX)/bin while the support modules live in
