@@ -75,3 +75,78 @@ platform-specific I/O constraints.
 This protocol originated with the measurements and draft contributed by
 [@outtodata in #867](https://github.com/JustVugg/colibri/issues/867), including
 their later correction of the #863 explanation.
+
+## Compare HTTP serving with a fixed workload
+
+`c/tools/benchmark_http_serving.py` uses the OpenAI-compatible streaming chat
+endpoint and Python's standard library. Run it against Colibri, SGLang, or vLLM
+with the same workload and generation settings. This measures the whole HTTP
+request path, including server queueing and prefill, unlike a steady-decode-only
+engine benchmark. No performance comparison is implied by providing the tool.
+
+Create a UTF-8 JSONL file with one conversation per line. Rows contain only
+`messages`; messages contain a `system`, `user`, or `assistant` role and string
+`content`:
+
+```jsonl
+{"messages":[{"role":"user","content":"Explain how a CPU cache works."}]}
+{"messages":[{"role":"system","content":"Answer briefly."},{"role":"user","content":"What is a mutex?"}]}
+```
+
+From the repository root, with the server already running:
+
+```sh
+python3 c/tools/benchmark_http_serving.py \
+  --base-url http://127.0.0.1:8000/v1 --model your-served-model \
+  --workload prompts.jsonl --concurrency 4 --repeats 3 \
+  --max-tokens 128 --temperature 0 --timeout 60 --output colibri-c4.json
+```
+
+Repeat with the other server's API root, model alias, and a distinct output file.
+Authentication uses `OPENAI_API_KEY`, or the environment variable named by
+`--api-key-env`; keys and message contents are not copied into reports. The
+endpoint and model alias are recorded. URLs with credentials, queries or
+fragments are rejected, and redirects are not followed. The requested endpoint
+must support `stream_options.include_usage`; errors are recorded rather than
+silently changing the workload or retrying.
+
+The JSON report includes the workload's SHA-256, generation settings, one record
+per attempt in input order, HTTP status, failure category, relative start time,
+duration, first output time, finish reason, and reported completion tokens.
+Failed requests remain in the report, and any failure makes the command exit 1.
+Latency summaries use successful requests only, with nearest-rank p50/p95/p99
+and sample counts. Failed requests retain their individual durations and any
+observed output/usage.
+
+Measurement boundaries:
+
+- Concurrency is closed-loop: at most that many requests are in flight, and each
+  worker starts its next request after its previous stream ends. There is no
+  arrival-rate model, warmup, automatic retry, or cache flush. Repeats reuse the
+  conversations in file order; prefix caching and scheduling can affect results.
+- Request timing begins inside the worker, before HTTP connection setup, and
+  excludes waiting for a local worker. Each request uses a new connection.
+  `--timeout` limits individual socket operations, **not total request time**;
+  a stream that keeps sending data can last longer.
+- `first_output_seconds` measures receipt of the first nonempty content,
+  reasoning, or tool-function name/arguments delta. Role-only and empty deltas
+  do not count. This is client-visible first output latency, not necessarily
+  time to a visible answer or to exactly one token. Empty successful output
+  has no first-output sample. SSE chunk gaps are not reported as token latency.
+- Success requires both a finish reason and `[DONE]`. HTTP errors, stream errors,
+  malformed responses, and incomplete streams are failures. This establishes
+  protocol completion, not output correctness.
+- Token counts come only from `usage.completion_tokens`. Successful completion
+  token throughput divides those counts by the **entire batch wall time**,
+  including failed attempts. It is null if any successful request lacks usage
+  (or no request succeeds). Counts from failed streams are excluded. Inspect
+  failure rate and usage coverage alongside throughput; backend tokenizers,
+  reasoning-token accounting, and stopping policies may differ.
+
+For a meaningful comparison, record the model weights, quantization, tokenizer,
+chat template, reasoning mode, server commands/versions, cache state and hardware
+beside the report. Keep requested settings equal, check actual output lengths,
+and run an independent quality check: this tool deliberately does not save
+response text or assess correctness. Retain the workload file with its hash,
+interleave server runs, and report repeated-run spread. Start at concurrency 1,
+then increase it to expose queueing and prefill interference.
