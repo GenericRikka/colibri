@@ -1880,6 +1880,10 @@ tests/test_qwen36_tier_autoplace$(EXE): tests/test_qwen36_tier_autoplace.c tests
 tests/test_qwen36_tier_fp8$(EXE): tests/test_qwen36_tier_fp8.c tests/qwen36_fake_cuda.h qwen36_tier.c qwen36_tier.h backend_cuda.h compat.h
 	$(CC) $(CFLAGS) -DCOLI_CUDA $< -o $@ $(LDFLAGS)
 
+# Failed gate/up/down uploads must release every unpublished CUDA tensor.
+tests/test_qwen36_tier_rollback$(EXE): tests/test_qwen36_tier_rollback.c tests/qwen36_fake_cuda.h qwen36_tier.c qwen36_tier.h backend_cuda.h compat.h
+	$(CC) $(CFLAGS) -DCOLI_CUDA $< -o $@ $(LDFLAGS)
+
 # Generic resident dense matrices (the Qwen3.8 trunk) and per-offer placement.
 tests/test_qwen36_tier_dense$(EXE): tests/test_qwen36_tier_dense.c tests/qwen36_fake_cuda.h qwen36_tier.c qwen36_tier.h backend_cuda.h
 	$(CC) $(CFLAGS) -DCOLI_CUDA $< -o $@ $(LDFLAGS)
