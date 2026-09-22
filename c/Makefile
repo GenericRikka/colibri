@@ -956,10 +956,12 @@ rans: $(RANSLIB)
 $(RANSLIB): tools/rans_ctypes.c rans.h
 	$(CC) $(CFLAGS) -fPIC -shared $< -o $@ $(LDFLAGS)
 
-cuda-test: backend_cuda.cu backend_cuda.h backend_gpu_compat.h tests/test_backend_cuda.cu tests/test_ragged_attention.cu tests/test_absorb_determinism.cu tests/test_mxfp4_cuda.cu tests/mxfp4_ref.c tests/test_fp8_warp_cuda.cu tests/test_fp8_cuda.cu tests/test_weights_owned_cuda.cu tests/test_cuda_fmt_trap_cuda.cu tests/test_alloc_footprint_cuda.cu
+cuda-test: backend_cuda.cu backend_cuda.h backend_gpu_compat.h tests/test_backend_cuda.cu tests/test_ragged_attention.cu tests/test_absorb_determinism.cu tests/test_mxfp4_cuda.cu tests/mxfp4_ref.c tests/test_fp8_warp_cuda.cu tests/test_fp8_cuda.cu tests/test_weights_owned_cuda.cu tests/test_cuda_fmt_trap_cuda.cu tests/test_alloc_footprint_cuda.cu tests/test_cuda_init_failure.cu
 	@command -v "$(GPUCC)" >/dev/null 2>&1 || { echo "$(GPUCC_NAME) not found" >&2; exit 1; }
 	"$(GPUCC)" $(GPUFLAGS) backend_cuda.cu tests/test_backend_cuda.cu -o backend_cuda_test$(EXE) $(ANS_NVCC_LIBS) $(GPU_TEST_LIBS)
 	./backend_cuda_test$(EXE)
+	"$(GPUCC)" $(GPUFLAGS) tests/test_cuda_init_failure.cu -o cuda_init_failure_test$(EXE) $(ANS_NVCC_LIBS) $(GPU_TEST_LIBS)
+	./cuda_init_failure_test$(EXE)
 	"$(GPUCC)" $(GPUFLAGS) backend_cuda.cu tests/test_ragged_attention.cu -o ragged_attention_test$(EXE) $(GPU_TEST_LIBS)
 	./ragged_attention_test$(EXE)
 	# weight_at's device-side refusal (the __trap()) on real silicon. The
