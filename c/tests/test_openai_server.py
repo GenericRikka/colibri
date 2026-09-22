@@ -650,6 +650,31 @@ class SchedulerTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "queue_full")
         self.assertEqual(scheduler.snapshot()["rejected"], 1)
 
+    def test_any_slot_request_uses_capacity_not_reserved_by_older_waiters(self):
+        scheduler = GenerationScheduler(capacity=2)
+        # State immediately after both slots are released, before the older
+        # slot-0 waiter reacquires the condition lock.
+        older = (object(), 0)
+        scheduler.queue.append(older)
+        with patch.object(scheduler.condition, "wait", side_effect=AssertionError("unused free slot")):
+            with scheduler.admit() as (_, slot):
+                self.assertEqual(slot, 1)
+                self.assertEqual(list(scheduler.queue), [older])
+        self.assertEqual(scheduler.free_slots, {0, 1})
+
+    def test_older_any_slot_and_same_slot_waiters_keep_priority(self):
+        for older_slot, requested in ((None, None), (None, 1), (0, 0)):
+            with self.subTest(older_slot=older_slot, requested=requested):
+                scheduler = GenerationScheduler(capacity=2)
+                older = (object(), older_slot)
+                scheduler.queue.append(older)
+                with patch.object(scheduler.condition, "wait",
+                                  side_effect=lambda _timeout: scheduler.queue.remove(older)) as wait:
+                    with scheduler.admit(slot=requested) as (_, slot):
+                        self.assertEqual(slot, 0 if requested is None else requested)
+                wait.assert_called_once()
+                self.assertEqual(scheduler.snapshot()["queued"], 0)
+
     def test_zero_queue_rejects_busy_pinned_slot_with_spare_capacity(self):
         scheduler = GenerationScheduler(max_queue=0, queue_timeout=0.01, capacity=2)
         with scheduler.admit(slot=0):

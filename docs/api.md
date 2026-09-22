@@ -101,6 +101,9 @@ is free. Queue deadlines are checked before slot assignment: an expired
 waiter receives `queue_timeout` even if a slot is now available. `GET /health` exposes
 active/queued/completed/rejected counters, and successful generation responses
 include `x-colibri-queue-wait-ms`.
+Requests targeting any slot may use a free slot not reserved by earlier waiters.
+An earlier pinned request keeps priority for its target; an earlier any-slot
+request keeps priority across all slots.
 
 ## Prometheus metrics
 

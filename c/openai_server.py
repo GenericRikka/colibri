@@ -171,23 +171,18 @@ class GenerationScheduler:
                     self.condition.notify_all()
                     raise APIError(429, "Timed out waiting for the inference engine.", None,
                                    "queue_timeout", "rate_limit_error", {"Retry-After": "1"})
-                available = min(self.free_slots) if slot is None and self.free_slots else slot
-                # (#B2) Admit as soon as our target slot is free AND no strictly-earlier
-                # waiter also wants it (an earlier waiter "wants" it if it is any-slot or
-                # pinned to the same slot). This replaces the old strict FIFO-head rule,
-                # which let a head pinned to a busy slot block every request behind it —
-                # even ones targeting a currently-free slot (head-of-line blocking).
-                # ponytail: O(queue) scan per wakeup — negligible at the default max_queue;
-                # switch to per-slot wait sets if max_queue is ever raised to thousands.
-                can_admit = available in self.free_slots
-                if can_admit:
-                    for t2, s2 in self.queue:
-                        if t2 is ticket:
-                            break
-                        if s2 is None or s2 == available:
-                            can_admit = False
-                            break
-                if can_admit:
+                candidates = self.free_slots.copy() if slot is None else self.free_slots & {slot}
+                # Older pinned waiters reserve only their target. An older
+                # any-slot waiter has priority over every available slot.
+                for earlier_ticket, earlier_slot in self.queue:
+                    if earlier_ticket is ticket:
+                        break
+                    if earlier_slot is None:
+                        candidates.clear()
+                        break
+                    candidates.discard(earlier_slot)
+                if candidates:
+                    available = min(candidates)
                     break
                 self.condition.wait(min(remaining, 0.25))
             self.queue.remove(entry)
