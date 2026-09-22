@@ -4526,7 +4526,8 @@ class APIHandler(BaseHTTPRequestHandler):
         completion_id = id_prefix + uuid.uuid4().hex
         created = int(time.time())
 
-        with self.server.scheduler.admit(self.client_disconnected, cache_slot) as admission:
+        with self.server.scheduler.admit(self.client_disconnected, cache_slot) as admission, \
+                contextlib.ExitStack() as stream_cleanup:
             queue_wait, cache_slot = admission
             queue_headers = {"x-colibri-queue-wait-ms": str(round(queue_wait * 1000))}
             if not stream:
@@ -4677,6 +4678,8 @@ class APIHandler(BaseHTTPRequestHandler):
                             "logprobs": None, "finish_reason": None}])
                 ka_thread[0] = threading.Thread(target=_keepalive, daemon=True)
                 ka_thread[0].start()
+                stream_cleanup.callback(ka_thread[0].join, timeout=2)
+                stream_cleanup.callback(ka_stop.set)
             if chat and tools:
                 # Suppress tool-call markers from the streamed content and parse the authoritative
                 # calls from the FULL reply after generation. Hold back a marker-length tail so a
@@ -4959,7 +4962,8 @@ class APIHandler(BaseHTTPRequestHandler):
             reason = "tool_calls" if calls else ("length" if stats["length_limited"] else "stop")
             return content, self.ANTHROPIC_STOP[reason]
 
-        with self.server.scheduler.admit(self.client_disconnected, cache_slot) as admission:
+        with self.server.scheduler.admit(self.client_disconnected, cache_slot) as admission, \
+                contextlib.ExitStack() as stream_cleanup:
             queue_wait, cache_slot = admission
             queue_headers = {"x-colibri-queue-wait-ms": str(round(queue_wait * 1000))}
             if not stream:
@@ -5040,6 +5044,8 @@ class APIHandler(BaseHTTPRequestHandler):
                                                    "content_block": {"type": "text", "text": ""}})
             ka_thread = threading.Thread(target=keepalive, daemon=True)
             ka_thread.start()
+            stream_cleanup.callback(ka_thread.join, timeout=2)
+            stream_cleanup.callback(ka_stop.set)
 
             raw = []
             sideband = ToolSideband(ARCH == "kimi" and bool(tools), stop_sequences,

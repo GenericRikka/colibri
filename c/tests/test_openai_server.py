@@ -2859,6 +2859,44 @@ class KeepAliveFramingTest(unittest.TestCase):
         self.assertIn("event: message_stop", raw)
         self.assertNotIn("<STILL-OPEN>", raw)
 
+    def test_stream_exit_stops_keepalive_before_releasing_slot(self):
+        class CancelledEngine(_ExplodingEngine):
+            def generate(self, *args, **kwargs):
+                try:
+                    return super().generate(*args, **kwargs)
+                except RuntimeError:
+                    raise ClientCancelled()
+
+        original_thread = threading.Thread
+        for path in ("/v1/chat/completions", "/v1/messages"):
+            for engine_type, outcome in ((_ExplodingEngine, "failed"),
+                                         (CancelledEngine, "cancelled")):
+                with self.subTest(path=path, outcome=outcome):
+                    pumps = []
+                    def thread_factory(*args, **kwargs):
+                        thread = original_thread(*args, **kwargs)
+                        target = kwargs.get("target")
+                        if getattr(target, "__name__", "") in ("_keepalive", "keepalive"):
+                            stop = next(cell.cell_contents for cell in target.__closure__
+                                        if isinstance(cell.cell_contents, threading.Event))
+                            pumps.append((thread, stop))
+                        return thread
+                    server = self._server(engine_type())
+                    try:
+                        with patch.object(threading, "Thread", side_effect=thread_factory):
+                            status, _ = self._post(self._conn(server),
+                                dict(self.CHAT, stream=True, max_tokens=16), path=path)
+                        self.assertEqual(status, 200)
+                        self.assertEqual(len(pumps), 1)
+                        self.assertFalse(pumps[0][0].is_alive(), "keepalive survived stream exit")
+                        stats = server.scheduler.snapshot()
+                        self.assertEqual(stats[outcome], 1)
+                        self.assertEqual((stats["active"], stats["completed"]), (0, 0))
+                    finally:
+                        for thread, stop in pumps:
+                            stop.set()
+                            thread.join(2)
+
     def test_engine_failure_after_commit_does_not_splice_a_second_response(self):
         """Once the 200 is out, a 500 status line would land inside the event stream."""
         server = self._server(_ExplodingEngine())
