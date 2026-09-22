@@ -158,6 +158,11 @@ class GenerationScheduler:
                     self.condition.notify_all()
                     raise APIError(503, "The inference scheduler is shutting down.", None,
                                    "scheduler_closed", "server_error")
+                if cancelled and cancelled():
+                    self.queue.remove(entry)
+                    self.cancelled += 1
+                    self.condition.notify_all()
+                    raise ClientCancelled()
                 available = min(self.free_slots) if slot is None and self.free_slots else slot
                 # (#B2) Admit as soon as our target slot is free AND no strictly-earlier
                 # waiter also wants it (an earlier waiter "wants" it if it is any-slot or
@@ -176,11 +181,6 @@ class GenerationScheduler:
                             break
                 if can_admit:
                     break
-                if cancelled and cancelled():
-                    self.queue.remove(entry)
-                    self.cancelled += 1
-                    self.condition.notify_all()
-                    raise ClientCancelled()
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     self.queue.remove(entry)

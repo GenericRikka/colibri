@@ -664,6 +664,51 @@ class SchedulerTest(unittest.TestCase):
         self.assertEqual(stats["timed_out"], 1)
         self.assertEqual(stats["cancelled"], 1)
 
+    def test_cancelled_request_does_not_acquire_a_free_slot(self):
+        scheduler = GenerationScheduler()
+        with self.assertRaises(ClientCancelled):
+            with scheduler.admit(lambda: True):
+                self.fail("cancelled request admitted")
+        stats = scheduler.snapshot()
+        self.assertEqual((stats["active"], stats["queued"], stats["admitted"], stats["cancelled"]),
+                         (0, 0, 0, 1))
+        self.assertIn("colibri_scheduler_queue_wait_seconds_count 0\n", scheduler.prometheus())
+        with scheduler.admit():
+            pass
+
+    def test_cancellation_wins_when_a_waiting_slot_becomes_free(self):
+        scheduler = GenerationScheduler(queue_timeout=1)
+        waiting = threading.Event()
+        cancelled = threading.Event()
+        outcomes = []
+        holder = scheduler.admit()
+        holder.__enter__()
+        def is_cancelled():
+            waiting.set()
+            return cancelled.is_set()
+        def run():
+            try:
+                with scheduler.admit(is_cancelled):
+                    outcomes.append("admitted")
+            except ClientCancelled:
+                outcomes.append("cancelled")
+        thread = threading.Thread(target=run)
+        thread.start()
+        observed = waiting.wait(1)
+        # Publish cancellation and release capacity under the same lock, so
+        # the waiter must observe both on its next scheduling pass.
+        with scheduler.condition:
+            cancelled.set()
+            holder.__exit__(None, None, None)
+        thread.join(2)
+        self.assertTrue(observed)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(outcomes, ["cancelled"])
+        stats = scheduler.snapshot()
+        self.assertEqual((stats["admitted"], stats["completed"], stats["cancelled"]), (1, 1, 1))
+        self.assertEqual((stats["active"], stats["queued"]), (0, 0))
+        self.assertIn("colibri_scheduler_slot_duration_seconds_count 1\n", scheduler.prometheus())
+
     def test_counts_admitted_client_cancellation_without_completion(self):
         scheduler = GenerationScheduler(max_queue=0, queue_timeout=1)
         with self.assertRaises(ClientCancelled):

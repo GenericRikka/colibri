@@ -116,7 +116,7 @@ All names start with `colibri_scheduler_`:
 | `completed_total` | counter | Admitted requests that returned normally |
 | `failed_total` | counter | Admitted requests that raised an error, excluding `ClientCancelled` |
 | `rejected_total`, `timed_out_total` | counter | Queue-full refusals and queue timeouts |
-| `cancelled_total` | counter | Cancellations while queued or admitted |
+| `cancelled_total` | counter | Cancellations detected before admission or during admitted work |
 | `queue_wait_seconds` | histogram | Wait until admission, for admitted requests only |
 | `slot_duration_seconds` | histogram | Slot occupancy until completion, failure, or cancellation |
 | `first_output_seconds` | histogram | Engine-call start to first nonempty text or tool-output callback |
@@ -127,6 +127,13 @@ and `+Inf`; each histogram exposes `_bucket`, `_sum`, and `_count`.
 Counters reset when the gateway restarts. Collection does not call the engine
 or consume a generation slot. `failed` is also included in `/health`'s
 authenticated scheduler snapshot; failures no longer increment `completed`.
+
+Cancellation is checked before acquiring an available KV slot, including when a
+waiting request wakes as capacity becomes free. A request cancelled at this
+point increments `cancelled_total`, but not `admitted_total`, and contributes
+no admission-wait or slot-duration sample. Queue-full and scheduler-closed
+checks can still reject a request before the cancellation check is reached.
+
 
 The engine-call histograms exclude admission queue wait and prompt rendering.
 First output is observed before the gateway's stop filtering, reasoning split,
