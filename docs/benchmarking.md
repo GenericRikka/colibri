@@ -118,11 +118,23 @@ Latency summaries use successful requests only, with nearest-rank p50/p95/p99
 and sample counts. Failed requests retain their individual durations and any
 observed output/usage.
 
+Optional `--warmup-requests N` sends N requests before measurement, cycling
+through workload rows with the same generation settings and concurrency limit.
+Warmup is closed-loop even when the measured phase uses `--request-rate`.
+All warmup requests finish before a fresh measurement clock and arrival schedule
+start. Their rows and summary are recorded separately under `warmup`; they do
+not contribute to measured latency, tokens, throughput, or SLO goodput. The
+default is zero (no warmup). If any warmup request fails, the report has
+`status: "warmup_failed"`, `summary: null`, and an empty measured `requests` list;
+the command exits 1 without starting measurement. Successful warmup does not
+prove stable performance. It can populate prefix caches, so record the same
+warmup and cache policy when comparing engines or runs.
+
 Measurement boundaries:
 
 - Without `--request-rate`, concurrency is closed-loop: at most that many
   requests are in flight, and each worker starts its next request after its
-  previous stream ends. There is no warmup, automatic retry, or cache flush. Repeats reuse the
+  previous stream ends. There is no automatic retry or cache flush. Repeats reuse the
   conversations in file order; prefix caching and scheduling can affect results.
 - Request timing begins inside the worker, before HTTP connection setup, and
   excludes waiting for a local worker. Each request uses a new connection.

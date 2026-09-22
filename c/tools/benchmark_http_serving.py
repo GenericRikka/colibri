@@ -253,6 +253,13 @@ def positive_int(value):
     return number
 
 
+def nonnegative_int(value):
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("must be nonnegative")
+    return number
+
+
 def positive_float(value):
     number = float(value)
     if not math.isfinite(number) or number <= 0:
@@ -268,6 +275,8 @@ def main():
     parser.add_argument("--output", required=True, help="JSON report path")
     parser.add_argument("--concurrency", type=positive_int, default=1)
     parser.add_argument("--repeats", type=positive_int, default=1)
+    parser.add_argument("--warmup-requests", type=nonnegative_int, default=0,
+                        help="unmeasured requests before the timed phase (default: 0)")
     parser.add_argument("--request-rate", type=positive_float, help="fixed scheduled arrivals per second")
     parser.add_argument("--max-tokens", type=positive_int, default=128)
     parser.add_argument("--temperature", type=float, default=0)
@@ -285,23 +294,32 @@ def main():
             raise ValueError("output must differ from workload")
     except (ValueError, OSError) as exc:
         parser.error(str(exc))
-    results, summary = run(url, workload, args.model, args.concurrency, args.repeats,
-                           args.max_tokens, args.temperature,
-                           os.environ.get(args.api_key_env, ""), args.timeout,
-                           args.slo_first_output, args.slo_duration, args.request_rate)
+    key = os.environ.get(args.api_key_env, "")
+    warmup = None
+    if args.warmup_requests:
+        prompts = [workload[i % len(workload)] for i in range(args.warmup_requests)]
+        rows, stats = run(url, prompts, args.model, args.concurrency, 1,
+                          args.max_tokens, args.temperature, key, args.timeout)
+        warmup = {"summary": stats, "requests": rows}
+    results, summary = [], None
+    if warmup is None or warmup["summary"]["failed"] == 0:
+        results, summary = run(url, workload, args.model, args.concurrency, args.repeats,
+                               args.max_tokens, args.temperature, key, args.timeout,
+                               args.slo_first_output, args.slo_duration, args.request_rate)
     report = {"schema_version": 1, "config": {
         "endpoint": url, "model": args.model, "workload_sha256": digest,
         "workload_rows": len(workload), "concurrency": args.concurrency,
         "load_model": "fixed_rate" if args.request_rate is not None else "closed_loop",
-        "request_rate": args.request_rate,
+        "request_rate": args.request_rate, "warmup_requests": args.warmup_requests,
         "repeats": args.repeats, "max_tokens": args.max_tokens,
         "temperature": args.temperature, "socket_timeout_seconds": args.timeout,
         "slo_first_output_seconds": args.slo_first_output, "slo_duration_seconds": args.slo_duration,
         "stream": True, "include_usage": True, "n": 1},
-        "summary": summary, "requests": results}
+        "status": "warmup_failed" if summary is None else "measured",
+        "warmup": warmup, "summary": summary, "requests": results}
     Path(args.output).write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
-    print(json.dumps(summary, indent=2))
-    return 1 if summary["failed"] else 0
+    print(json.dumps(summary if summary is not None else warmup, indent=2))
+    return 1 if summary is None or summary["failed"] else 0
 
 
 if __name__ == "__main__":

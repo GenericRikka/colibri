@@ -192,6 +192,47 @@ class BenchmarkTest(unittest.TestCase):
                                    row["first_output_seconds"] + row["dispatch_delay_seconds"])
         self.assertEqual(summary["arrival_timing"]["dispatch_delay_seconds"]["count"], 3)
 
+    def test_cli_warmup_is_separate_and_failure_skips_measurement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workload = Path(directory) / "prompts.jsonl"
+            output = Path(directory) / "report.json"
+            prompts = self.workload + [{"messages": [{"role": "user", "content": "second"}]}]
+            workload.write_text("".join(json.dumps(p) + "\n" for p in prompts))
+            command = [sys.executable, bench.__file__, "--base-url", self.url.rsplit("/", 1)[0],
+                       "--model", "fixture", "--workload", str(workload), "--output", str(output),
+                       "--warmup-requests", "3", "--concurrency", "2", "--repeats", "2",
+                       "--request-rate", "100", "--slo-duration", "5"]
+            for status, expected_exit in ((200, 0), (503, 1)):
+                with self.subTest(status=status):
+                    self.server.status = status
+                    self.server.payloads.clear()
+                    completed = subprocess.run(command, capture_output=True, text=True, timeout=10)
+                    self.assertEqual(completed.returncode, expected_exit, completed.stderr)
+                    report = json.loads(output.read_text())
+                    warmup = report["warmup"]
+                    self.assertEqual(warmup["summary"]["requests"], 3)
+                    self.assertIsNone(warmup["summary"]["arrival_timing"])
+                    self.assertIsNone(warmup["summary"]["latency_slo"])
+                    self.assertLessEqual(self.server.peak, 2)
+                    self.assertCountEqual([p["messages"] for p in self.server.payloads[:3]],
+                                          [prompts[i % 2]["messages"] for i in range(3)])
+                    if expected_exit:
+                        self.assertEqual(report["status"], "warmup_failed")
+                        self.assertIsNone(report["summary"])
+                        self.assertEqual(report["requests"], [])
+                        self.assertEqual(len(self.server.payloads), 3)
+                    else:
+                        self.assertEqual(report["status"], "measured")
+                        self.assertEqual(len(self.server.payloads), 7)
+                        self.assertEqual(report["summary"]["requests"], 4)
+                        self.assertEqual(report["summary"]["reported_successful_completion_tokens"], 12)
+                        self.assertEqual(report["summary"]["latency_slo"]["requests_met"], 4)
+                        self.assertEqual([r["scheduled_seconds"] for r in report["requests"]],
+                                         [0, .01, .02, .03])
+            completed = subprocess.run(command + ["--warmup-requests", "-1"],
+                                       capture_output=True, text=True, timeout=10)
+            self.assertEqual(completed.returncode, 2)
+
     def test_cli_report_and_failure_exit(self):
         with tempfile.TemporaryDirectory() as directory:
             workload = Path(directory) / "prompts.jsonl"
@@ -319,6 +360,35 @@ class ParsingTest(unittest.TestCase):
         self.assertAlmostEqual(sleeps[1], .07)
         for row, expected in zip(rows, [0, .11, .21]):
             self.assertAlmostEqual(row["start_seconds"], expected)
+
+    def test_warmup_time_is_excluded_from_measured_throughput(self):
+        now = [0.0]
+        calls = []
+        def request(_url, _payload, _key, _timeout, index, origin):
+            start = now[0]
+            duration = 100 if not calls else 1
+            calls.append(origin)
+            now[0] += duration
+            return {"index": index, "start_seconds": start - origin, "success": True,
+                    "first_output_seconds": duration, "duration_seconds": duration,
+                    "completion_tokens": 3}
+        with tempfile.TemporaryDirectory() as directory:
+            workload = Path(directory) / "workload.jsonl"
+            output = Path(directory) / "report.json"
+            workload.write_text('{"messages":[{"role":"user","content":"hello"}]}\n')
+            argv = [bench.__file__, "--base-url", "http://unused/v1", "--model", "fixture",
+                    "--workload", str(workload), "--output", str(output),
+                    "--warmup-requests", "1", "--repeats", "2", "--slo-duration", "2"]
+            with patch.object(sys, "argv", argv), patch.object(sys, "stdout", io.StringIO()), \
+                 patch.object(bench.time, "perf_counter", side_effect=lambda: now[0]), \
+                 patch.object(bench, "request_one", side_effect=request):
+                self.assertEqual(bench.main(), 0)
+            report = json.loads(output.read_text())
+        self.assertEqual(calls, [0, 100, 100])
+        self.assertEqual(report["warmup"]["summary"]["wall_seconds"], 100)
+        self.assertEqual(report["summary"]["wall_seconds"], 2)
+        self.assertEqual(report["summary"]["successful_completion_tokens_per_second"], 3)
+        self.assertEqual(report["summary"]["latency_slo"]["goodput_requests_per_second"], 1)
 
     def test_request_rate_must_be_positive_and_finite(self):
         for value in ("0", "-1", "nan", "inf"):
