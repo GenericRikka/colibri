@@ -90,6 +90,8 @@ typedef struct {
     /* Streaming MXFP4 weights are refreshed on every call; only storage is reused. */
     void *mxfp4_weights, *mxfp4_scales;
     size_t mxfp4_weights_cap, mxfp4_scales_cap;
+    void *mxfp4_expert_weights, *mxfp4_expert_scales;
+    size_t mxfp4_expert_weights_cap, mxfp4_expert_scales_cap;
     /* Staging of the resident dense matvec (coli_cuda_matmul), apart from
      * x/y: the expert group (coli_cuda_expert_group_issue) runs on ctx->stream
      * asynchronously while the engine's thread keeps computing -- qwen38's
@@ -639,6 +641,14 @@ __global__ static void silu_mul(float *gate, const float *up, size_t n) {
     if (i < n) {
         float v = gate[i];
         gate[i] = (v / (1.0f + expf(-v))) * up[i];
+    }
+}
+
+__global__ static void situ_mul(float *gate, const float *up, size_t n, float b1, float b2) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float g = gate[i], u = up[i];
+        gate[i] = b1 * tanhf(g / b1) * (1.f / (1.f + expf(-g))) * b2 * tanhf(u / b2);
     }
 }
 
@@ -1304,6 +1314,8 @@ extern "C" void coli_cuda_shutdown(void) {
         if (!select_ctx(ctx)) continue;
         if (ctx->mxfp4_weights) cudaFree(ctx->mxfp4_weights);
         if (ctx->mxfp4_scales) cudaFree(ctx->mxfp4_scales);
+        if (ctx->mxfp4_expert_weights) cudaFree(ctx->mxfp4_expert_weights);
+        if (ctx->mxfp4_expert_scales) cudaFree(ctx->mxfp4_expert_scales);
         if (ctx->x) cudaFree(ctx->x);
         if (ctx->y) cudaFree(ctx->y);
         if (ctx->dx) cudaFree(ctx->dx);
@@ -1330,6 +1342,8 @@ extern "C" void coli_cuda_shutdown(void) {
 #endif
         ctx->mxfp4_weights = ctx->mxfp4_scales = nullptr;
         ctx->mxfp4_weights_cap = ctx->mxfp4_scales_cap = 0;
+        ctx->mxfp4_expert_weights = ctx->mxfp4_expert_scales = nullptr;
+        ctx->mxfp4_expert_weights_cap = ctx->mxfp4_expert_scales_cap = 0;
         ctx->x = ctx->y = ctx->gate = ctx->up = nullptr;
         ctx->dx = ctx->dy = nullptr; ctx->dx_cap = ctx->dy_cap = 0;
         ctx->qx=nullptr; ctx->qscale=nullptr;
@@ -1764,6 +1778,52 @@ extern "C" int coli_cuda_matmul_mxfp4(float *y, const float *x,
                                     7, S, I, O, rb, 32, (int)ng);
         ok = cuda_ok(cudaGetLastError(), "mxfp4 launch") &&
              cuda_ok(cudaMemcpy(y, ctx->y, yb, cudaMemcpyDeviceToHost), "mxfp4 output download");
+    }
+    return ok;
+}
+
+/* Reuse one weight/scale staging allocation across the three projections.
+ * Default-stream copies are ordered after the previous projection's reads. */
+static int mxfp4_project(float *y, const float *x, uint8_t *dw, uint8_t *ds,
+        const uint8_t *w, const uint8_t *sc, int S, int I, int O) {
+    size_t rb = ((size_t)I + 1) / 2, ng = ((size_t)I + 31) / 32;
+    if (!cuda_ok(cudaMemcpy(dw, w, (size_t)O * rb, cudaMemcpyHostToDevice), "expert weight upload") ||
+        !cuda_ok(cudaMemcpy(ds, sc, (size_t)O * ng, cudaMemcpyHostToDevice), "expert scale upload")) return 0;
+    quant_matmul<<<dim3(O, S), 256>>>(y, x, dw, reinterpret_cast<const float *>(ds),
+                                    7, S, I, O, rb, 32, (int)ng);
+    return cuda_ok(cudaGetLastError(), "MXFP4 expert projection");
+}
+
+extern "C" int coli_cuda_expert_mxfp4(float *y, const float *x,
+        const unsigned char *gate_w, const unsigned char *gate_s,
+        const unsigned char *up_w, const unsigned char *up_s,
+        const unsigned char *down_w, const unsigned char *down_s,
+        int S, int D, int I, float b1, float b2) {
+    if (fault_injected() || !x || !y || !gate_w || !gate_s || !up_w || !up_s ||
+        !down_w || !down_s || S < 1 || S > 65535 || D < 1 || I < 1 ||
+        !(b1 > 0.f) || !(b2 > 0.f) || !std::isfinite(b1) || !std::isfinite(b2)) return 0;
+    DeviceContext *ctx = find_ctx(0);
+    if (!select_ctx(ctx)) return 0;
+    size_t xb = (size_t)S * D * sizeof(float), ib = (size_t)S * I * sizeof(float);
+    if (!reserve(&ctx->x, &ctx->x_cap, xb) || !reserve(&ctx->y, &ctx->y_cap, xb) ||
+        !reserve(&ctx->gate, &ctx->gate_cap, ib) || !reserve(&ctx->up, &ctx->up_cap, ib)) return 0;
+    size_t gw = (size_t)I * (((size_t)D + 1) / 2), dwb = (size_t)D * (((size_t)I + 1) / 2);
+    size_t gs = (size_t)I * (((size_t)D + 31) / 32), dsb = (size_t)D * (((size_t)I + 31) / 32);
+    /* Grow to the largest projection seen, then reuse across routed experts.
+     * Slot identity is irrelevant: every call refreshes all weight bytes. */
+    if (!reserve_bytes(&ctx->mxfp4_expert_weights, &ctx->mxfp4_expert_weights_cap, gw > dwb ? gw : dwb) ||
+        !reserve_bytes(&ctx->mxfp4_expert_scales, &ctx->mxfp4_expert_scales_cap, gs > dsb ? gs : dsb)) return 0;
+    uint8_t *dw = static_cast<uint8_t *>(ctx->mxfp4_expert_weights);
+    uint8_t *ds = static_cast<uint8_t *>(ctx->mxfp4_expert_scales);
+    int ok = cuda_ok(cudaMemcpy(ctx->x, x, xb, cudaMemcpyHostToDevice), "expert input upload") &&
+        mxfp4_project(ctx->gate, ctx->x, dw, ds, gate_w, gate_s, S, D, I) &&
+        mxfp4_project(ctx->up, ctx->x, dw, ds, up_w, up_s, S, D, I);
+    if (ok) {
+        size_t n = (size_t)S * I;
+        situ_mul<<<(unsigned)((n + 255) / 256), 256>>>(ctx->gate, ctx->up, n, b1, b2);
+        ok = cuda_ok(cudaGetLastError(), "SiTU-GLU launch") &&
+            mxfp4_project(ctx->y, ctx->gate, dw, ds, down_w, down_s, S, I, D) &&
+            cuda_ok(cudaMemcpy(y, ctx->y, xb, cudaMemcpyDeviceToHost), "expert output download");
     }
     return ok;
 }

@@ -118,6 +118,15 @@ COLI_CUDA_DLLEXPORT int coli_cuda_matmul_mxfp4(float *y, const float *x,
                                                const unsigned char *e8s,
                                                int S, int I, int O);
 
+/* Streaming Kimi expert: down(SiTU(gate(x), up(x))). Weights are MXFP4
+ * host buffers; intermediate activations remain on device. No weight cache.
+ * Returns 0 on failure; callers must accumulate y only after success. */
+COLI_CUDA_DLLEXPORT int coli_cuda_expert_mxfp4(float *y, const float *x,
+        const unsigned char *gate_w, const unsigned char *gate_s,
+        const unsigned char *up_w, const unsigned char *up_s,
+        const unsigned char *down_w, const unsigned char *down_s,
+        int S, int D, int I, float b1, float b2);
+
 COLI_CUDA_DLLEXPORT int coli_cuda_matmul(ColiCudaTensor **tensor,
                      float *y, const float *x,
                      const void *weights, const float *scales,
