@@ -96,6 +96,32 @@ int main(void) {
     agree(cpu,gpu,H); agree(rec,m.DN_rec[0],VH*KD*VD); agree(conv,m.DN_conv[0],C*(CK-1));
     coli_cuda_tensor_free(G_dnp[0].t); memset(&G_dnp[0],0,sizeof(G_dnp[0]));
     qt_shutdown();
+    /* Prefix extension must preserve state across separate calls, including a
+     * split immediately before, on, and after the 256-row block boundary. */
+    const int splits[]={1,255,256,257};
+    for(int split_index=0;split_index<4;split_index++) for(int failure=0;failure<2;failure++){
+        int split=splits[split_index];
+        float cpu_next[H], gpu_next[H];
+        clear_state(&m);
+        deltanet(&m,&l,0,x,S,0,cpu);
+        deltanet(&m,&l,0,x,1,S,cpu_next);
+        memcpy(rec,m.DN_rec[0],sizeof(rec)); memcpy(conv,m.DN_conv[0],sizeof(conv));
+        clear_state(&m);calls=0;
+        fail_call=failure ? (split+255)/256+1 : 0;
+        CHECK(qt_dnproj_init(0,q,sc,H,O,0));
+        deltanet(&m,&l,0,x,split,0,gpu);
+        deltanet(&m,&l,0,x+(size_t)split*H,S-split,split,gpu+(size_t)split*H);
+        CHECK(calls==(split+255)/256+(failure?1:(S-split+255)/256));
+        int before_decode=calls;
+        deltanet(&m,&l,0,x,1,S,gpu_next);
+        CHECK(calls==before_decode+!failure);
+        if(!failure) CHECK(last_rows==1);
+        CHECK(qt_dnproj_ready(0)==!failure);
+        agree(cpu,gpu,S*H); agree(cpu_next,gpu_next,H);
+        agree(rec,m.DN_rec[0],VH*KD*VD); agree(conv,m.DN_conv[0],C*(CK-1));
+        coli_cuda_tensor_free(G_dnp[0].t); memset(&G_dnp[0],0,sizeof(G_dnp[0]));
+        qt_shutdown();
+    }
 #ifdef COLI_DNPROJ_REAL_CUDA
     coli_cuda_shutdown();
 #endif
