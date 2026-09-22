@@ -164,6 +164,13 @@ class GenerationScheduler:
                     self.cancelled += 1
                     self.condition.notify_all()
                     raise ClientCancelled()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.queue.remove(entry)
+                    self.timed_out += 1
+                    self.condition.notify_all()
+                    raise APIError(429, "Timed out waiting for the inference engine.", None,
+                                   "queue_timeout", "rate_limit_error", {"Retry-After": "1"})
                 available = min(self.free_slots) if slot is None and self.free_slots else slot
                 # (#B2) Admit as soon as our target slot is free AND no strictly-earlier
                 # waiter also wants it (an earlier waiter "wants" it if it is any-slot or
@@ -182,13 +189,6 @@ class GenerationScheduler:
                             break
                 if can_admit:
                     break
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    self.queue.remove(entry)
-                    self.timed_out += 1
-                    self.condition.notify_all()
-                    raise APIError(429, "Timed out waiting for the inference engine.", None,
-                                   "queue_timeout", "rate_limit_error", {"Retry-After": "1"})
                 self.condition.wait(min(remaining, 0.25))
             self.queue.remove(entry)
             self.free_slots.remove(available)

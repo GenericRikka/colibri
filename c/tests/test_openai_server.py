@@ -606,7 +606,7 @@ class SchedulerTest(unittest.TestCase):
 
     def test_prometheus_histograms_measure_admission_and_slot_occupancy(self):
         scheduler = GenerationScheduler()
-        with patch("openai_server.time.monotonic", side_effect=[10, 10.25, 12.25]):
+        with patch("openai_server.time.monotonic", side_effect=[10, 10.25, 10.25, 12.25]):
             with scheduler.admit():
                 active = scheduler.prometheus()
                 self.assertIn("colibri_scheduler_active 1\n", active)
@@ -677,6 +677,36 @@ class SchedulerTest(unittest.TestCase):
         self.assertEqual(timed_out.exception.code, "queue_timeout")
         self.assertEqual(stats["timed_out"], 1)
         self.assertEqual(stats["cancelled"], 1)
+
+    def test_queue_deadline_wins_when_slot_becomes_free(self):
+        for released_at in (0.9, 1.0, 1.1):
+            with self.subTest(released_at=released_at):
+                scheduler = GenerationScheduler(queue_timeout=1)
+                now = [0.0]
+                with patch("openai_server.time.monotonic", side_effect=lambda: now[0]):
+                    holder = scheduler.admit()
+                    holder.__enter__()
+                    def release(_timeout):
+                        now[0] = released_at
+                        holder.__exit__(None, None, None)
+                    with patch.object(scheduler.condition, "wait", side_effect=release):
+                        if released_at < 1:
+                            with scheduler.admit():
+                                pass
+                        else:
+                            with self.assertRaises(APIError) as caught:
+                                with scheduler.admit():
+                                    pass
+                            self.assertEqual(caught.exception.code, "queue_timeout")
+                    stats = scheduler.snapshot()
+                    expected = 2 if released_at < 1 else 1
+                    self.assertEqual((stats["admitted"], stats["completed"]), (expected, expected))
+                    self.assertEqual((stats["active"], stats["queued"], stats["timed_out"]),
+                                     (0, 0, int(released_at >= 1)))
+                    self.assertIn(f"colibri_scheduler_slot_duration_seconds_count {expected}\n",
+                                  scheduler.prometheus())
+                    with scheduler.admit():
+                        pass
 
     def test_cancelled_request_does_not_acquire_a_free_slot(self):
         scheduler = GenerationScheduler()

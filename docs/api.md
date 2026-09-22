@@ -97,7 +97,8 @@ Configure it with `--max-queue N` (default 8) and `--queue-timeout SECONDS`
 variables. Saturated and timed-out requests receive OpenAI-shaped HTTP 429
 errors before streaming headers are sent. With `--max-queue 0`, a request
 pinned to an occupied KV slot is rejected immediately even if another slot
-is free. `GET /health` exposes
+is free. Queue deadlines are checked before slot assignment: an expired
+waiter receives `queue_timeout` even if a slot is now available. `GET /health` exposes
 active/queued/completed/rejected counters, and successful generation responses
 include `x-colibri-queue-wait-ms`.
 
