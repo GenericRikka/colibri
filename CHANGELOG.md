@@ -5,7 +5,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [1.12.1] — 2026-09-22
 
-53 pull requests since v1.12.0, 41 of them from contributors. Two tokenizers
+54 pull requests since v1.12.0, 42 of them from contributors. Two tokenizers
 brought back to the reference, brio on the ninth engine, `coli chat` working
 again at the default context on two families, and a placement decision that
 is now measured on the card in front of it instead of predicted.
@@ -122,6 +122,14 @@ is now measured on the card in front of it instead of predicted.
 - **#1673**: the streaming MXFP4 matmul reuses one grow-only device scratch
   per card instead of allocating and freeing weights and scales on every
   call.
+- **#1559** (kreuzzelg): `convert_qwen36.py --down-bits 8` writes the mixed
+  expert layout, int4 gs64 gate/up and int8 down in one slab (5.7 bits per
+  weight against gs64's 4.5); the engine tells it apart by size and reads
+  each matrix in its own format on the CPU path, and refuses the VRAM tier
+  with a line. It is the knob behind the #1370 numbers: on wikitext-2 the
+  int8 down alone recovers a quarter of the gap between gs64 and all-int8,
+  the rest sits in gate/up. A measurement tool and a middle step, not the
+  answer to the gap.
 - **#1686** (DebugSultan): qwen38's prefill chunk (`Q38_PREFILL_BATCH_ROWS`)
   and workspace (`Q38_PREFILL_WORKSPACE_MIB`) are runtime knobs, the expert
   load batch is no longer capped at top-k, and the QSA ranking and
