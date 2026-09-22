@@ -32,9 +32,9 @@ import os, sys, subprocess, argparse, json, time, signal, shutil, threading, re,
 # and the console provides its own editing; on FreeBSD Python links libedit,
 # which this activates the same way.
 try:
-    import readline  # noqa: F401 — importing it is the activation
+    import readline
 except ImportError:
-    pass
+    readline = None
 
 # The engine mmaps every shard (144+ files); macOS default RLIMIT_NOFILE is 256.
 if sys.platform != "win32":
@@ -1195,7 +1195,7 @@ def cmd_info(a):
         try: n_shards=len([x for x in os.listdir(a.model) if x.endswith('.safetensors')])
         except OSError: n_shards=0
         print(f"   {C.yel}config.json is missing{C.r}: coli picks the engine from it, so nothing can run here yet.")
-        print(f"   Copy the checkpoint's config.json (with tokenizer.json and model.safetensors.index.json)")
+        print("   Copy the checkpoint's config.json (with tokenizer.json and model.safetensors.index.json)")
         print(f"   from the model repo next to the {n_shards} shard(s) found here, then run coli info again.")
     try:
         mi=open('/proc/meminfo').read()
@@ -1515,9 +1515,7 @@ def chat_commands_help():
 
 def install_chat_completer():
     """TAB completa i comandi. Senza readline (Windows) si perde solo il TAB."""
-    try:
-        import readline
-    except ImportError:
+    if readline is None:
         return
     names = [p + n for n in CHAT_COMMANDS for p in ("/", ":")]
     def complete(text, state):

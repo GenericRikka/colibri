@@ -48,7 +48,7 @@ Usage (mixed: int4 gs64 gate/up, int8 down -- the #1370 experiment):
   python tools/convert_qwen36.py --model <hf> --out ./qwen36_i4_gs64_d8 --ebits 4 --gs 64 --down-bits 8
 """
 
-import argparse, json, math, os, struct, sys
+import argparse, json, math, os, struct, sys, tempfile
 from pathlib import Path
 
 # Windows: force UTF-8 output
@@ -63,7 +63,7 @@ try:
     import torch
     from safetensors.numpy import safe_open as safe_open_np
     from safetensors.torch import safe_open as safe_open_pt
-    from safetensors.torch import save_file
+    from safetensors.torch import save_file, load_file
 except ImportError as exc:
     sys.exit(f"Missing dependencies: {exc}. Install: pip install torch safetensors")
 
@@ -169,7 +169,6 @@ def _unpack_int4(packed: "torch.Tensor") -> "torch.Tensor":
 
 def _selftest():
     """Round-trip check for the true-int4 packing used by --ebits<=4."""
-    import random
     print("=== int4 pack/unpack selftest ===")
     ok = True
     for ebits in (2, 3, 4):
@@ -180,9 +179,7 @@ def _selftest():
         d = torch.randn(H, inter) * 3
         mw, qs = make_merged(g, u, d, ebits)
         # serialize to safetensors + reload (exercises the real dtype path)
-        import tempfile, os
         td = tempfile.mkdtemp()
-        from safetensors.torch import save_file, load_file
         save_file({"merged_weight": mw, "qs": qs}, os.path.join(td, "e0.safetensors"))
         back = load_file(os.path.join(td, "e0.safetensors"))
         mw_r = back["merged_weight"]
