@@ -1253,7 +1253,12 @@ extern "C" int coli_cuda_init(const int *devices, int count) {
             return 0;
         }
     }
-    g_nctx = 0;
+    if (g_nctx) {
+        int same = count == g_nctx;
+        for (int i = 0; same && i < count; i++) same = devices[i] == g_ctx[i].device;
+        if (!same) std::fprintf(stderr, "[CUDA] device list change requires shutdown first\n");
+        return same;
+    }
     for (int i = 0; i < count; i++) {
         int device = devices[i];
         DeviceContext *ctx = &g_ctx[g_nctx];
