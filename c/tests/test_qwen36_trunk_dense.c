@@ -159,16 +159,16 @@ int main(void) {
     /* Drive attention itself: this catches an S==1 gate left at any of the
      * four projection call sites, which a tier-only test cannot detect. */
     {
-        enum { S = 3 };
+        enum { S = 5 };
 #ifdef _OPENMP
         omp_set_num_threads(1);
 #endif
-        m.max_t = m.kv_cap = S;
+        m.max_t = m.kv_cap = S + 1;
         m.K = calloc(NL, sizeof(float *)); m.V = calloc(NL, sizeof(float *));
-        m.K[1] = calloc(S * KVH * KD, sizeof(float));
-        m.V[1] = calloc(S * KVH * KD, sizeof(float));
-        m.attn_sc = calloc(S, sizeof(float));
-        float *x = rnd_matrix(S, D), gpu[S * D], cpu[S * D], fallback[S * D];
+        m.K[1] = calloc((S + 1) * KVH * KD, sizeof(float));
+        m.V[1] = calloc((S + 1) * KVH * KD, sizeof(float));
+        m.attn_sc = calloc(S + 1, sizeof(float));
+        float *x = rnd_matrix(S + 1, D), gpu[S * D], cpu[S * D], fallback[S * D];
         Layer host = *at;
         host.qth_q = host.qth_k = host.qth_v = host.qth_o = 0;
         attention(&m, &host, 1, x, S, 0, cpu);
@@ -202,6 +202,40 @@ int main(void) {
                     ck(fake_matmuls==calls+3,"disabled handle stays on CPU; healthy projections stay on GPU");
                 }
             }
+        }
+        /* Split prefill at a nonzero position, then decode another token.
+         * Compare both the observable output and the state consumed next. */
+        float reference[(S+1)*D], continued[(S+1)*D];
+        float keys[(S+1)*KVH*KD], values[(S+1)*KVH*KD];
+        attention(&m,&host,1,x,S+1,0,reference);
+        memcpy(keys,m.K[1],sizeof keys); memcpy(values,m.V[1],sizeof values);
+        for(int failure=-1;failure<4;failure++){
+            for(int i=0;i<4;i++) G_dense[handles[i]-1].on=1;
+            memset(m.K[1],0,sizeof keys); memset(m.V[1],0,sizeof values);
+            calls=fake_matmuls;
+            attention(&m,at,1,x,2,0,continued);
+            if(failure>=0) fake_matmul_fail_at=fake_matmuls+failure+1;
+            attention(&m,at,1,x+2*D,S-2,2,continued+2*D);
+            fake_matmul_fail_at=0;
+            attention(&m,at,1,x+S*D,1,S,continued+S*D);
+            ck(fake_matmuls==calls+(failure<0?12:11),
+               "segmented prefill and decode keep only the failed projection on CPU");
+            double gap=0, scale=1e-6;
+            int finite=1;
+            for(int i=0;i<(S+1)*D;i++){
+                finite &= isfinite(continued[i]) && isfinite(reference[i]);
+                gap=fmax(gap,fabs((double)continued[i]-reference[i]));
+                scale=fmax(scale,fabs(reference[i]));
+            }
+            ck(finite && gap/scale<1e-4,"segmented attention outputs match full CPU prefill");
+            gap=0; scale=1e-6; finite=1;
+            for(int i=0;i<(S+1)*KVH*KD;i++){
+                finite &= isfinite(m.K[1][i]) && isfinite(m.V[1][i]);
+                gap=fmax(gap,fabs((double)m.K[1][i]-keys[i]));
+                gap=fmax(gap,fabs((double)m.V[1][i]-values[i]));
+                scale=fmax(scale,fmax(fabs(keys[i]),fabs(values[i])));
+            }
+            ck(finite && gap/scale<1e-4,"segmented attention preserves CPU-equivalent KV state");
         }
         free(x); free(m.K[1]); free(m.V[1]); free(m.K); free(m.V); free(m.attn_sc);
     }
