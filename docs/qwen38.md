@@ -66,7 +66,6 @@ are FP32; BF16 matrices use FP32 accumulation, while native FP8 uses FP32 dot
 products within each 128-column block and FP64 accumulation across the scaled
 blocks. The bounded per-layer cache therefore spends about one quarter of the
 previous memory per FP8 expert. Context state grows by about 54 KiB per token.
-There is currently no Qwen3.8 GPU backend.
 
 ## What stays on disk
 
