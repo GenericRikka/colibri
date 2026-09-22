@@ -78,6 +78,8 @@ void qt_trunk_withdraw(const char *why);
 int  qt_dnproj_init(int layer, const int8_t *q, const float *sc,
                     int I, int O, int device);
 int  qt_dnproj_matmul(int layer, float *y, const float *x, int I, int O);
+int  qt_dnproj_ready(int layer);
+int  qt_dnproj_matmul_batch(int layer, float *y, const float *x, int S, int I, int O);
 /* Generic resident dense matrix (int8 per-row, one GEMV per call), addressed
  * by a handle: the Qwen3.8 trunk uses this for every matrix it places. Offer
  * the size with qt_trunk_offer(name, layer, bytes) before qt_init, ask
@@ -151,6 +153,8 @@ static inline int  qt_place_is_auto(void){return 0;}
 static inline void qt_trunk_withdraw(const char*a){(void)a;}
 static inline int  qt_dnproj_init(int a,const int8_t*b,const float*c,int d,int e,int f){(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;return 0;}
 static inline int  qt_dnproj_matmul(int a,float*b,const float*c,int d,int e){(void)a;(void)b;(void)c;(void)d;(void)e;return 0;}
+static inline int  qt_dnproj_ready(int a){(void)a;return 0;}
+static inline int  qt_dnproj_matmul_batch(int a,float*b,const float*c,int d,int e,int f){(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;return 0;}
 static inline int  qt_dense_init(const int8_t*a,const float*b,int c,int d,int e){(void)a;(void)b;(void)c;(void)d;(void)e;return -1;}
 static inline int  qt_dense_matmul(int a,float*b,const float*c,int d,int e){(void)a;(void)b;(void)c;(void)d;(void)e;return 0;}
 static inline int  qt_dense_matmul_batch(int a,float*b,const float*c,int d,int e,int f){(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;return 0;}

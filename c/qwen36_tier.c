@@ -844,13 +844,20 @@ int qt_dense_matmul(int h, float *y, const float *x, int I, int O){
 }
 int qt_dense_count(void){ return G_dense_n; }
 
-int qt_dnproj_matmul(int layer, float *y, const float *x, int I, int O){
-    if(layer < 0 || layer >= QT_DN_MAX_LAYERS || !G_dnp[layer].on) return 0;
-    if(coli_cuda_matmul(&G_dnp[layer].t,y,x,NULL,NULL,1,1,I,O,G_dnp[layer].dev,0))
+int qt_dnproj_ready(int layer){
+    return layer >= 0 && layer < QT_DN_MAX_LAYERS && G_dnp[layer].on;
+}
+int qt_dnproj_matmul_batch(int layer, float *y, const float *x, int S, int I, int O){
+    if(!qt_dnproj_ready(layer) || S <= 0) return 0;
+    if(coli_cuda_matmul(&G_dnp[layer].t,y,x,NULL,NULL,1,S,I,O,G_dnp[layer].dev,0))
         return 1;
     fprintf(stderr,"[dnp] layer %d GPU matmul failed; CPU from here on\n", layer);
     G_dnp[layer].on = 0;
     return 0;
+}
+
+int qt_dnproj_matmul(int layer, float *y, const float *x, int I, int O){
+    return qt_dnproj_matmul_batch(layer, y, x, 1, I, O);
 }
 
 int qt_lmhead_matmul(float *y, const float *x, int I, int O){
