@@ -695,7 +695,7 @@ int qt_init(int nl, int ne, int D, int Ih, int cap, int topk, int expert_gs,
             } else fprintf(stderr,"[place] experts=%d nicht verfuegbar -> COLI_GPUS bleibt\n",ed);
         } else if(!G_auto_on && G_place_n && qt_place_named("experts")){
             fprintf(stderr,"[place] experts=cpu -> VRAM-Tier aus\n");
-            return 0;
+            goto fail_storage;
         } else if(nres && !G_auto_on){
             int w=0;
             for(int i=0;i<G.ndev;i++){
@@ -734,12 +734,14 @@ int qt_init(int nl, int ne, int D, int Ih, int cap, int topk, int expert_gs,
      * (#1339). The stride and G.is_k's row capacity are the same constant. */
     G.is_x_floats=(size_t)G.ndev*QT_MAX_ROWS*D;
     G.is_x=malloc(G.is_x_floats*sizeof(float));
-    if(!G.is_x) return 0;
-    pthread_mutex_init(&G.mx,NULL); pthread_cond_init(&G.cv,NULL); pthread_cond_init(&G.cv_take,NULL);
+    if(!G.is_x) goto fail_storage;
+    if(pthread_mutex_init(&G.mx,NULL)) goto fail_storage;
+    if(pthread_cond_init(&G.cv,NULL)) goto fail_mutex;
+    if(pthread_cond_init(&G.cv_take,NULL)) goto fail_cv;
     qt_aff_get(&aff); qt_aff_widen(&aff);                  /* the uploader inherits this mask */
     int th_ok=pthread_create(&G.th,NULL,uploader,NULL)==0;
     qt_aff_restore(&aff);
-    if(!th_ok) return 0;
+    if(!th_ok) goto fail_cv_take;
     G.on=1;
     fprintf(stderr,"[qtier] CUDA VRAM expert tier active: %d device(s), %.2f MB/expert\n",
             G.ndev, G.exp_bytes/1048576.0);
@@ -749,6 +751,20 @@ int qt_init(int nl, int ne, int D, int Ih, int cap, int topk, int expert_gs,
      * as CPU-only and --gpu was refused (#1533). */
     fprintf(stderr,"[CUDA] mode: routed experts (qwen36 VRAM tier)\n");
     return 1;
+
+fail_cv_take:
+    pthread_cond_destroy(&G.cv_take);
+fail_cv:
+    pthread_cond_destroy(&G.cv);
+fail_mutex:
+    pthread_mutex_destroy(&G.mx);
+fail_storage:
+    free(G.is_x); G.is_x=NULL; G.is_x_floats=0;
+    free(G.heat0); G.heat0=NULL;
+    free(G.slot); G.slot=NULL;
+    G_lmh.dev_ok=0;
+    /* CUDA contexts may also serve standalone dense projections. */
+    return 0;
 }
 
 int qt_ready(void){ return G.on; }
