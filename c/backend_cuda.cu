@@ -1250,28 +1250,34 @@ extern "C" int coli_cuda_init(const int *devices, int count) {
     int available = 0;
     if (!devices || count < 1 || count > COLI_CUDA_MAX_DEVICES) return 0;
     if (!cuda_ok(cudaGetDeviceCount(&available), "device discovery")) return 0;
-    g_nctx = 0;
+    /* Validate the whole list before creating resources or replacing state. */
+    for (int i = 0; i < count; i++) {
+        if (devices[i] < 0 || devices[i] >= available) {
+            std::fprintf(stderr, "[CUDA] invalid device %d (available: 0..%d)\n", devices[i], available - 1);
+            return 0;
+        }
+        for (int j = 0; j < i; j++) if (devices[j] == devices[i]) {
+            std::fprintf(stderr, "[CUDA] duplicate device %d\n", devices[i]);
+            return 0;
+        }
+    }
+    if (g_nctx) {
+        int same = count == g_nctx;
+        for (int i = 0; same && i < count; i++) same = devices[i] == g_ctx[i].device;
+        if (!same) std::fprintf(stderr, "[CUDA] device list change requires shutdown first\n");
+        return same;
+    }
     for (int i = 0; i < count; i++) {
         int device = devices[i];
-        if (device < 0 || device >= available) {
-            std::fprintf(stderr, "[CUDA] invalid device %d (available: 0..%d)\n", device, available - 1);
-            g_nctx = 0;
-            return 0;
-        }
-        if (find_ctx(device)) {
-            std::fprintf(stderr, "[CUDA] duplicate device %d\n", device);
-            g_nctx = 0;
-            return 0;
-        }
         DeviceContext *ctx = &g_ctx[g_nctx];
         *ctx = {};
         ctx->device = device;
-        if (!select_ctx(ctx)) { g_nctx = 0; return 0; }
+        if (!select_ctx(ctx)) { coli_cuda_shutdown(); return 0; }
         cudaDeviceProp prop{};
-        if (!cuda_ok(cudaGetDeviceProperties(&prop, device), "device properties")) { g_nctx = 0; return 0; }
+        if (!cuda_ok(cudaGetDeviceProperties(&prop, device), "device properties")) { coli_cuda_shutdown(); return 0; }
         ctx->compute_major=prop.major;ctx->compute_minor=prop.minor;
         if(!cuda_ok(cudaStreamCreateWithFlags(&ctx->stream,cudaStreamNonBlocking),"stream creation")){
-            g_nctx=0;return 0;
+            coli_cuda_shutdown();return 0;
         }
 #ifdef COLI_ANS
         if(std::getenv("CUDA_RAW_EXPERTS")){

@@ -53,7 +53,10 @@ static inline int coli_cuda_weight_at_supported(int fmt) {
 /* Opaque, persistent device copy of one resident quantized tensor. */
 typedef struct ColiCudaTensor ColiCudaTensor;
 
-/* Devices are CUDA ordinals, not positions in the input list. */
+/* Devices are CUDA ordinals, not positions in the input list.
+ * Repeating the same ordered list preserves active contexts. Changing an
+ * active list returns 0 without replacing it; release tensors and shut down
+ * before selecting a different list. Init/shutdown require caller serialization. */
 COLI_CUDA_DLLEXPORT int coli_cuda_init(const int *devices, int count);
 COLI_CUDA_DLLEXPORT void coli_cuda_shutdown(void);
 /* Number of CUDA devices visible to this process, before a device list is
