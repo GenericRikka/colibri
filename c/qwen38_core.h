@@ -1386,23 +1386,30 @@ typedef struct {
 static int q38_expert_get_batch(Model *m,int layer,const int *experts,int count,
                                 Slot **selected) {
     if(!m->expert_parallel_reads||!experts||!selected||count<2||
-       count>Q38_MAX_TOPK)return 0;
+       count>m->cache[layer].cap)return 0;
     LCache *cache=&m->cache[layer];
-    if(cache->cap<count||!q38_prepare_expert_scale_bank(m,layer))return 0;
-    Q38ExpertLoadJob jobs[Q38_MAX_TOPK];
+    if(!q38_prepare_expert_scale_bank(m,layer))return 0;
+    /* The demand set is no longer bounded by the decode top-k: the MoE prefill
+     * hands over the whole chunk union (up to the cache cap) so its loads run
+     * one OMP wave instead of serial groups of Q38_MAX_TOPK.  Load grouping
+     * never touches FP order: routed outputs are written per assignment and
+     * the per-position expert sum follows the router order, so a bigger wave
+     * only changes WHICH slots serve the reads, not the arithmetic. */
+    Q38ExpertLoadJob *jobs=malloc((size_t)count*sizeof(*jobs));
+    if(!jobs)return 0;
     for(int index=0;index<count;index++){
         int expert=experts[index];
-        if(expert<0||expert>=m->c.experts)return 0;
+        if(expert<0||expert>=m->c.experts){free(jobs);return 0;}
         q38_ehit_mark(m,layer,expert);
         for(int previous=0;previous<index;previous++)
-            if(experts[previous]==expert)return 0;
+            if(experts[previous]==expert){free(jobs);return 0;}
         int slot_index=cache->by_expert[expert];
         if(slot_index>=0){
-            if(slot_index>=cache->n||cache->slots[slot_index].eid!=expert)return 0;
+            if(slot_index>=cache->n||cache->slots[slot_index].eid!=expert){free(jobs);return 0;}
             continue;
         }
         st_tensor *weight[3];
-        if(!q38_native_fp8_expert_tensors(m,layer,expert,weight))return 0;
+        if(!q38_native_fp8_expert_tensors(m,layer,expert,weight)){free(jobs);return 0;}
     }
     unsigned char *protected_slots=(unsigned char*)calloc((size_t)cache->cap,1);
     if(!protected_slots){fprintf(stderr,"OOM expert batch reservations\n");exit(1);}
@@ -1463,6 +1470,7 @@ static int q38_expert_get_batch(Model *m,int layer,const int *experts,int count,
             cache->by_expert[jobs[job].expert]=(int)(slot-cache->slots);
         }
     }
+    free(jobs);
     return 1;
 }
 
@@ -2199,7 +2207,6 @@ static void q38_moe_prefill(Model *m,Layer *l,int layer,const float *x,
          * loaded once for this chunk, and a later group may safely reuse its
          * slots because the preceding outputs already live in routed_out. */
         int load_limit=m->cache[layer].cap;
-        if(load_limit>Q38_MAX_TOPK)load_limit=Q38_MAX_TOPK;
         if(load_limit<1)load_limit=1;
         for(int unique_base=0;unique_base<unique_count;) {
             int load_count=unique_count-unique_base;
