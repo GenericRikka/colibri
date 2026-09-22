@@ -176,16 +176,33 @@ int main(void) {
         attention(&m, at, 1, x, S, 0, gpu);
         ck(fake_matmuls == calls + 4 && fake_matmul_rows == S,
            "prefill dispatches all four projections as batches");
-        fake_matmul_fail = 1;
-        attention(&m, at, 1, x, S, 0, fallback);
-        fake_matmul_fail = 0;
-        double gap = 0, scale = 1e-6;
-        for (int i = 0; i < S * D; i++) {
-            gap = fmax(gap, fabs((double)gpu[i] - cpu[i]));
-            gap = fmax(gap, fabs((double)fallback[i] - cpu[i]));
-            scale = fmax(scale, fabs(cpu[i]));
+        int handles[]={at->qth_q,at->qth_k,at->qth_v,at->qth_o};
+        for(int failure=0;failure<4;failure++){
+            for(int i=0;i<4;i++) G_dense[handles[i]-1].on=1;
+            calls=fake_matmuls;
+            fake_matmul_fail_at=calls+failure+1;
+            attention(&m,at,1,x,S,0,fallback);
+            fake_matmul_fail_at=0;
+            ck(fake_matmuls==calls+4,"each projection attempted once on first failure");
+            for(int i=0;i<4;i++)
+                ck(G_dense[handles[i]-1].on==(i!=failure),"only failed projection disabled");
+            for(int pass=0;pass<2;pass++){
+                double gap=0, scale=1e-6;
+                int finite=1;
+                for(int i=0;i<S*D;i++){
+                    finite &= isfinite(cpu[i]) && isfinite(gpu[i]) && isfinite(fallback[i]);
+                    gap=fmax(gap,fabs((double)gpu[i]-cpu[i]));
+                    gap=fmax(gap,fabs((double)fallback[i]-cpu[i]));
+                    scale=fmax(scale,fabs(cpu[i]));
+                }
+                ck(finite && gap/scale<1e-4,"poisoned GPU output replaced by finite CPU-equivalent output");
+                if(pass==0){
+                    calls=fake_matmuls;
+                    attention(&m,at,1,x,S,0,fallback);
+                    ck(fake_matmuls==calls+3,"disabled handle stays on CPU; healthy projections stay on GPU");
+                }
+            }
         }
-        ck(gap / scale < 1e-4, "batch attention and failed-backend fallback agree with CPU");
         free(x); free(m.K[1]); free(m.V[1]); free(m.K); free(m.V); free(m.attn_sc);
     }
 
