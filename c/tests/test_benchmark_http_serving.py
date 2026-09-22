@@ -128,6 +128,22 @@ class BenchmarkTest(unittest.TestCase):
                 self.assertFalse(row["success"], row)
                 self.assertEqual(bench.summarize([row], 1, slo_duration=1)["latency_slo"]["requests_met"], 0)
 
+    def test_choice_after_finish_is_not_successful(self):
+        terminal = {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+        for delta, finish in (({"content": "late output"}, None), ({}, "length")):
+            with self.subTest(delta=delta, finish=finish):
+                extra = {"choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+                self.server.body = (event(terminal) + event(extra)
+                                    + event({"choices": [], "usage": {"completion_tokens": 999}})
+                                    + event("[DONE]")).encode()
+                row = self.request()
+                self.assertFalse(row["success"])
+                self.assertEqual(row["error"], "choice_after_finish")
+                self.assertEqual(row["finish_reason"], "stop")
+                summary = bench.summarize([row], 1, slo_duration=10)
+                self.assertEqual(summary["reported_successful_completion_tokens"], 0)
+                self.assertEqual(summary["latency_slo"]["requests_met"], 0)
+
     def test_supported_finish_reasons_and_null_delta(self):
         for finish in ("stop", "length", "tool_calls", "function_call", "content_filter"):
             with self.subTest(finish=finish):

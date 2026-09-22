@@ -150,6 +150,8 @@ Measurement boundaries:
   HTTP errors, stream errors, malformed responses, and incomplete streams fail.
   With `n=1`, each nonempty choices array must contain exactly one choice with
   integer index 0. Output text and tool-function fields must be strings or null.
+  Once a choice has finished, further choice chunks are rejected; a trailing
+  usage chunk with empty choices is accepted.
   This establishes protocol completion, not output correctness; filtered or
   length-limited output can still count as protocol success.
 - Token counts come only from `usage.completion_tokens`. Successful completion

@@ -128,6 +128,8 @@ def request_one(url, payload, key, timeout, index, origin):
                 choices = chunk.get("choices", [])
                 if not isinstance(choices, list) or len(choices) > 1:
                     raise StreamError("invalid_choices")
+                if choices and result["finish_reason"] is not None:
+                    raise StreamError("choice_after_finish")
                 for choice in choices:
                     if (not isinstance(choice, dict) or type(choice.get("index")) is not int
                             or choice["index"] != 0):
