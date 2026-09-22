@@ -249,8 +249,8 @@ whatever the placer accepts is quantized to **int8 per row** (scale = max|w|
 / 127, the qwen36 dnproj/lmhead format) when the tier starts -- about 2 s
 for the 553 matrices, 3.96 GiB on one card -- and answers decode GEMVs from
 there, one round trip per matmul (`x` up, `y` down; activations stay on the
-CPU). Prefill rows (S > 1) and any backend failure take the BF16 CPU path,
-which stays in RAM. The placer takes the trunk before the experts (it is
+CPU). Prefill rows (S > 1) and any backend failure take the CPU path, which
+holds the same int8 rows (see [the trunk on the CPU](#the-trunk-on-the-cpu-int8-rows)). The placer takes the trunk before the experts (it is
 read on every token), so on an 8 GB card about 2 GB remain for hot experts;
 `coli plan` prices it the same way (`4.0 GB int8 trunk + ... hot tier`).
 
@@ -260,7 +260,7 @@ read on every token), so on an 8 GB card about 2 GB remain for hot experts;
 | `Q38_TRUNK_MIN_KB=<n>` | offer matrices of at least n KiB (default 1024; a round trip costs more than a tiny GEMV saves) |
 | `Q38_TRUNK_SKIP=name,name` | leave the named components on the CPU (bisecting, or a component that does not pay) |
 | `QT_UPLOAD_SYNC=1` | the tier's `qt_issue` waits for every in-flight upload first (tests and diagnostics: deterministic residency, no upload/compute overlap) |
-| `Q38_TRUNK_CPU_INT8=1` | the same int8 rows on the CPU instead -- what the quantization alone does to the output, no GPU needed (perplexity, token parity); a matrix the GPU holds is still answered from VRAM |
+| `Q38_TRUNK_CPU_INT8=0` | keep the trunk BF16 on the CPU with the f32 kernel (the numeric reference); the default is int8 rows with integer dot products, GPU or not |
 | `Q38_TRUNK_SELFTEST=1` | at start, every placed matrix is checked once: GPU GEMV against the same int8 rows on the CPU (relative error printed per matrix) |
 
 **Numerics.** GPU int8 against CPU int8 on the same rows: relative error
@@ -311,6 +311,75 @@ in VRAM they overwrote the in-flight group's input and output -- no CUDA
 error, only wrong tokens, worse the more experts were resident. The dense
 path has its own buffers now ([qwen36-cuda-tier.md](qwen36-cuda-tier.md));
 qwen36 never called the dense path inside that window.
+
+### The trunk on the CPU: int8 rows
+
+Without a GPU the same trunk is the decode's floor: 8 GiB of BF16 read on
+every token, multiplied by a scalar loop. Since 1.12.1 the engine keeps the
+trunk on the CPU as **int8 rows with one scale per row** (the format the
+tier uploads, so GPU or not the rows are the same bytes), releases the BF16
+copy once the rows exist, and multiplies with the integer kernels of
+`idot.h`: the activation is quantized to int8 once per row and meets the
+weights with maddubs / vpdpbusd (AVX2 / AVX-512 VNNI) or NEON dot products.
+Decode and prefill take this path. Every matrix of at least
+`Q38_TRUNK_MIN_KB` (default 1 MiB) is in; the small ones stay BF16 because
+they cost nothing either way. `Q38_TRUNK_CPU_INT8=0` keeps the BF16 rows and
+the f32 kernel, the numeric reference.
+
+The routed experts stay e4m3 with their 128 x 128 block scales, but the
+kernel decodes eight bytes at a time in registers and multiplies with FMA
+(`q38_matmul_fp8_vec`); the block scale still applies once per block and the
+blocks still add in double, so it differs from the table kernel only by the
+float summation order inside a block. For a batch of prefill rows the block
+is decoded once and every row runs through it. `Q38_FP8_KERNEL=scalar`
+restores the table kernel.
+
+**Measured** on the released Qwen3.8-Flash-Next-FP8, a 16-core server shared
+with a training job, `OMP_NUM_THREADS=8`, RAM LRU cap 96 per layer, 100
+generated tokens, `COLI_TIMERS=1` decode bank:
+
+| | BF16 trunk, table FP8 (1.12.0) | BF16 trunk, vector FP8 | int8 trunk, vector FP8 (default) |
+|---|---:|---:|---:|
+| decode, tok/s | 0.61 | 0.77 | **1.42** |
+| resident-mm (dense trunk), ms/token | 434 | 437 | 85 |
+| lm-head, ms/token | 76 | 79 | 13 |
+| routed-expert GEMV, ms/token | 388 | 154 | 140 |
+| shared-expert, ms/token | 43 | 44 | 15 |
+| expert-read (page cache), ms/token | 156 | 155 | 140 |
+| peak RSS, GB | 32.2 | 32.2 | 28.5 |
+
+The middle column reproduces the first's text byte for byte over the 100
+tokens: the vector kernel is a faster way to compute the same thing. The
+int8 trunk is a quantization, and its cost is measured as perplexity, not
+assumed. Teacher-forced NLL on four 512-token chunks of the repository
+docs (8 prompt tokens, 504 scored), same machine:
+
+| chunk | BF16 trunk | int8 trunk | BF16 trunk, vector FP8 |
+|---|---:|---:|---:|
+| 0 | 1.4527 | 1.4416 | 1.4527 |
+| 1 | 2.4594 | 2.4544 | |
+| 2 | 2.3845 | 2.3929 | |
+| 3 | 2.7463 | 2.7753 | |
+| mean nats/token | 2.2607 | 2.2661 | |
+
++0.24% nats, about +0.5% perplexity, two chunks lower and two higher: the
+per-row int8 error is noise at this size. The vector FP8 kernel alone
+reproduces the BF16 run to four decimals.
+
+Prefill takes the same paths, and it is where the scalar BF16 loop hurt
+most. The 512-token chunk 0 as a prompt, one generated token:
+
+| | BF16 trunk, table FP8 | int8 trunk, vector FP8 |
+|---|---:|---:|
+| wall, 512 prompt tokens | 495 s | 149 s |
+| resident-mm | 205 s | 12 s |
+| routed-expert GEMV | 172 s | 34 s |
+| shared-expert | 15.5 s | 1.8 s |
+| expert-read | 28 s | 26 s |
+
+The trunk quantization takes 3.3 s at load for the 553 matrices and the
+RSS after load grows by 0.6 GB while the int8 rows and the BF16 copy
+coexist; once the BF16 is released the peak RSS of a run is 3.7 GB lower.
 
 ## Performance telemetry
 

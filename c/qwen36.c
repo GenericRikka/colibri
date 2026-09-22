@@ -1076,55 +1076,6 @@ static int g_qdw_n = 0;
 static int dense_idot_on(void){ static int v=-1; if(v<0){ const char *e=getenv("COLI_DENSE_IDOT"); v=!(e&&*e=='0'); } return v; }
 static int dense_bits(void){ static int v=-1; if(v<0){ const char *e=getenv("COLI_DENSE_BITS"); v=(e&&atoi(e)==4)?4:8; } return v; }
 
-/* Activation -> int8 with one scale, plus the int32 sum of every block of 64
- * (the K1b kernel subtracts 8*sum per group because its nibbles are unsigned).
- * Vectorized: the scalar lrintf loop was measured at ~7 us for 4096 values,
- * which times ~150 GEMVs per token is a millisecond thrown away. Rounding is
- * to nearest even in both paths, so the vector path equals qrow_i8 bit for bit. */
-static float dense_act_i8(const float *x, int I, int8_t *xq, int32_t *xsg){
-    float amax = 0.f;
-    int i = 0;
-#ifdef __AVX2__
-    {
-        __m256 am = _mm256_setzero_ps();
-        const __m256 sign = _mm256_set1_ps(-0.0f);
-        for (; i + 8 <= I; i += 8) am = _mm256_max_ps(am, _mm256_andnot_ps(sign, _mm256_loadu_ps(x + i)));
-        float tmp[8]; _mm256_storeu_ps(tmp, am);
-        for (int k = 0; k < 8; k++) if (tmp[k] > amax) amax = tmp[k];
-    }
-#endif
-    for (; i < I; i++) { float a = fabsf(x[i]); if (a > amax) amax = a; }
-    float s = amax / 127.f; if (s < 1e-12f) s = 1e-12f;
-    float inv = 1.f / s;
-    i = 0;
-#ifdef __AVX2__
-    {
-        const __m256 vinv = _mm256_set1_ps(inv);
-        for (; i + 32 <= I; i += 32) {
-            __m256i a = _mm256_cvtps_epi32(_mm256_mul_ps(_mm256_loadu_ps(x + i),      vinv));
-            __m256i b = _mm256_cvtps_epi32(_mm256_mul_ps(_mm256_loadu_ps(x + i + 8),  vinv));
-            __m256i c = _mm256_cvtps_epi32(_mm256_mul_ps(_mm256_loadu_ps(x + i + 16), vinv));
-            __m256i d = _mm256_cvtps_epi32(_mm256_mul_ps(_mm256_loadu_ps(x + i + 24), vinv));
-            /* packs interleave 128-bit lanes: fix the order with one permute */
-            __m256i ab = _mm256_packs_epi32(a, b), cd = _mm256_packs_epi32(c, d);
-            __m256i abcd = _mm256_packs_epi16(ab, cd);
-            abcd = _mm256_permutevar8x32_epi32(abcd, _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7));
-            _mm256_storeu_si256((__m256i *)(xq + i), abcd);
-        }
-    }
-#endif
-    for (; i < I; i++) xq[i] = (int8_t)lrintf(x[i] * inv);
-    if (xsg) {
-        int ng = I / 64;
-        for (int g = 0; g < ng; g++) {
-            int32_t sum = 0;
-            for (int k = 0; k < 64; k++) sum += xq[g * 64 + k];
-            xsg[g] = sum;
-        }
-    }
-    return s;
-}
-
 /* f32 rows -> int4 in blocks of 64 with one f32 scale per block, packed as the
  * K1b planar layout (unsigned nibbles v+8, block b: lo nibbles = elements
  * b*64..b*64+31, hi = b*64+32..b*64+63). The quantizer is the symmetric
