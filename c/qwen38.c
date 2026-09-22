@@ -1939,7 +1939,7 @@ int main(int argc, char **argv) {
 
     Model m; model_init(&m, snap, cap, bits);
     q38_tier_start(&m, cap);   /* COLI_CUDA=1: hot experts stream to VRAM (qwen36_tier.c) */
-    q38_trunk_cpu_int8(&m);    /* Q38_TRUNK_CPU_INT8=1: the trunk's int8 rows on the CPU (reference) */
+    q38_trunk_cpu_int8(&m);    /* the trunk's int8 rows on the CPU, BF16 released (Q38_TRUNK_CPU_INT8=0 keeps BF16) */
     if(is_ref)ref_logits=read_reference_logits(ref_root,m.c.vocab);
     g_capture_last_logit=ref_logits!=NULL||getenv("DUMP")!=NULL;
     q38_telemetry_init(snap, &m);
