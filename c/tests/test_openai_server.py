@@ -1275,6 +1275,40 @@ class CapSentinelShimTest(unittest.TestCase):
         self.assertNotIn("COLI_PLAN_CAP", child_env)
         self.assertEqual(child_env["KEEP"], "yes")
 
+    def test_v41_ram_plan_reaches_engine_argv(self):
+        model = self._model("deepseek_v41")
+        for settings, expected_ram in (({"RAM_GB": "120", "CTX": "8192"}, 120),
+                                       ({"CTX": "8192"}, 0),
+                                       ({"RAM_GB": "auto", "CTX": "8192"}, 0)):
+            with self.subTest(settings=settings):
+                process = FakeProcess(lambda _process, _frame: None)
+                with patch("resource_plan.build_plan", return_value={
+                        "tiers": {"ram": {"cache_slots_per_layer": 96}}}) as planner, \
+                        patch("openai_server.subprocess.Popen", return_value=process) as popen:
+                    engine = Engine("deepseek_v41", model, env=settings)
+                    engine.close()
+                planner.assert_called_once_with(model, ram_gb=expected_ram,
+                                                context=8192, gpu_indices=[])
+                self.assertEqual(popen.call_args[0][0], ["deepseek_v41", "96"])
+
+    def test_v41_explicit_and_calibrated_caps_bypass_planning(self):
+        for cap, env, expected in ((7, {}, 7), (0, {}, 0),
+                                   (None, {"COLI_PROFILE_CAP": "12"}, 12),
+                                   (None, {"COLI_PLAN_CAP": "24"}, 24)):
+            with self.subTest(cap=cap, env=env), patch("resource_plan.build_plan") as planner:
+                self.assertEqual(cap_for_arch("deepseek_v41", cap, env, model="model"),
+                                 expected)
+                planner.assert_not_called()
+
+    def test_v41_insufficient_ram_refuses_before_spawning(self):
+        model = self._model("deepseek_v41")
+        with patch("resource_plan.build_plan", return_value={
+                "tiers": {"ram": {"cache_slots_per_layer": 0}}}), \
+                patch("openai_server.subprocess.Popen") as popen:
+            with self.assertRaisesRegex(ValueError, "one expert slot"):
+                Engine("deepseek_v41", model, env={"RAM_GB": "8"})
+            popen.assert_not_called()
+
     def test_model_arch_reads_model_type(self):
         self.assertEqual(model_arch(self._model("glm_moe_dsa")), "glm")
         self.assertEqual(model_arch(self._model("inkling")), "inkling")

@@ -1204,8 +1204,11 @@ static void matmul_d(float *y, const float *x, const float *W, int S, int I, int
     matmul(y, x, W, S, I, O);
 }
 /* A dense matrix the tier placed in VRAM (handle+1 kept in the Layer, 0 = CPU):
- * one GEMV from the device, or 0 and the caller runs matmul_d as before. The
+ * a device matmul, or 0 and the caller runs matmul_d as before. The
  * tier turns a failing handle off itself, so the fallback is permanent. */
+static inline int qtd_batch(int hp1, float *y, const float *x, int S, int I, int O){
+    return hp1 > 0 && qt_dense_matmul_batch(hp1 - 1, y, x, S, I, O);
+}
 static inline int qtd(int hp1, float *y, const float *x, int I, int O){
     return hp1 > 0 && qt_dense_matmul(hp1 - 1, y, x, I, O);
 }
@@ -1984,11 +1987,11 @@ static void attention(Model *m, Layer *l, int layer, float *x, int S, int pos_ba
     float *q = falloc((int64_t)S*q_out);
     float *k = falloc((int64_t)S*kv_out);
     float *vv= falloc((int64_t)S*kv_out);
-    /* Decode (S == 1): the projections the tier placed answer from VRAM,
-     * one GEMV each; a prompt batch keeps the batched CPU matmul. */
-    if (!(S == 1 && qtd(l->qth_q, q, x, D, q_out)))   matmul_d(q, x, l->q, S, D, q_out);
-    if (!(S == 1 && qtd(l->qth_k, k, x, D, kv_out)))  matmul_d(k, x, l->k, S, D, kv_out);
-    if (!(S == 1 && qtd(l->qth_v, vv, x, D, kv_out))) matmul_d(vv, x, l->v, S, D, kv_out);
+    /* The projections the tier placed answer from VRAM for the whole batch,
+     * with one backend call per matrix; unavailable handles use CPU matmul. */
+    if (!qtd_batch(l->qth_q, q, x, S, D, q_out))   matmul_d(q, x, l->q, S, D, q_out);
+    if (!qtd_batch(l->qth_k, k, x, S, D, kv_out))  matmul_d(k, x, l->k, S, D, kv_out);
+    if (!qtd_batch(l->qth_v, vv, x, S, D, kv_out)) matmul_d(vv, x, l->v, S, D, kv_out);
     /* split q into query (first hd) and gate (next gate_dim), both per head */
     float *query = falloc((int64_t)S*H*hd);
     float *gate  = falloc((int64_t)S*H*gate_dim);
@@ -2050,7 +2053,7 @@ static void attention(Model *m, Layer *l, int layer, float *x, int S, int pos_ba
         float g = gate_dim ? gate[o] : 0.f;
         ag[o] = ctx[o] * (1.f / (1.f + expf(-g)));
     }
-    if (!(S == 1 && qtd(l->qth_o, out, ag, H*hd, D))) matmul_d(out, ag, l->o, S, H*hd, D);
+    if (!qtd_batch(l->qth_o, out, ag, S, H*hd, D)) matmul_d(out, ag, l->o, S, H*hd, D);
     free(q); free(k); free(vv); free(query); free(gate); free(ctx); free(ag);
 }
 
@@ -2383,7 +2386,10 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
                 tm_add(S, 3, tm_now()-_ts2);
             }
             double _q2 = tm_now();
-            qt_take(qmask, val, K, out + (int64_t)s*D);
+            if(!qt_take(qmask, val, K, out + (int64_t)s*D)){
+                fprintf(stderr,"qwen36: CUDA expert collection failed at layer %d; stopping inference\n",layer);
+                exit(1);
+            }
             if (tm_on() && S==1) {
                 extern double g_qt_iss, g_qt_cpu, g_qt_tak;
                 g_qt_iss += _q1-_q0; g_qt_cpu += _q2-_q1; g_qt_tak += tm_now()-_q2;
