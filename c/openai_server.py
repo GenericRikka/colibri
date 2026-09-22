@@ -110,6 +110,8 @@ def _engine_error(fields, message):
 class GenerationScheduler:
     """Bounded FIFO admission for the engine's independent KV contexts."""
 
+    _buckets = (0.001, 0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30, 60, 300, math.inf)
+
     def __init__(self, max_queue=8, queue_timeout=300, capacity=1):
         if max_queue < 0:
             raise ValueError("max_queue cannot be negative")
@@ -127,9 +129,12 @@ class GenerationScheduler:
         self.closed = False
         self.admitted = 0
         self.completed = 0
+        self.failed = 0
         self.rejected = 0
         self.timed_out = 0
         self.cancelled = 0
+        self.timings = {name: {"sum": 0.0, "buckets": [0] * len(self._buckets)}
+                        for name in ("queue_wait_seconds", "slot_duration_seconds")}
 
     @contextlib.contextmanager
     def admit(self, cancelled=None, slot=None):
@@ -187,21 +192,22 @@ class GenerationScheduler:
             self.free_slots.remove(available)
             self.active += 1
             self.admitted += 1
-            wait_seconds = time.monotonic() - queued_at
-        cancelled_after_admission = False
+            admitted_at = time.monotonic()
+            wait_seconds = admitted_at - queued_at
+            self._observe("queue_wait_seconds", wait_seconds)
+        outcome = "failed"
         try:
             yield wait_seconds, available
+            outcome = "completed"
         except ClientCancelled:
-            cancelled_after_admission = True
+            outcome = "cancelled"
             raise
         finally:
             with self.condition:
                 self.active -= 1
                 self.free_slots.add(available)
-                if cancelled_after_admission:
-                    self.cancelled += 1
-                else:
-                    self.completed += 1
+                setattr(self, outcome, getattr(self, outcome) + 1)
+                self._observe("slot_duration_seconds", time.monotonic() - admitted_at)
                 self.condition.notify_all()
 
     def snapshot(self):
@@ -209,9 +215,50 @@ class GenerationScheduler:
             return {"active": self.active, "queued": len(self.queue),
                     "capacity": self.capacity,
                     "max_queue": self.max_queue, "queue_timeout_seconds": self.queue_timeout,
-                    "admitted": self.admitted, "completed": self.completed,
+                    "admitted": self.admitted, "completed": self.completed, "failed": self.failed,
                     "rejected": self.rejected, "timed_out": self.timed_out,
                     "cancelled": self.cancelled}
+
+    def _observe(self, name, seconds):
+        # Called with condition held. Cumulative buckets need no request history.
+        timing = self.timings[name]
+        timing["sum"] += seconds
+        for i, bound in enumerate(self._buckets):
+            if seconds <= bound:
+                timing["buckets"][i] += 1
+
+    def prometheus(self):
+        """One consistent, bounded snapshot; no prompt or request-ID labels."""
+        gauges = {"active": "Currently admitted requests.",
+                  "queued": "Requests waiting for a KV slot.",
+                  "capacity": "Concurrent KV slots configured.",
+                  "max_queue": "Maximum waiting requests configured."}
+        counters = {"admitted": "Requests admitted to a KV slot.",
+                    "completed": "Admitted requests that returned normally.",
+                    "failed": "Admitted requests that raised an error.",
+                    "rejected": "Requests rejected because the queue was full.",
+                    "timed_out": "Requests that timed out waiting for a slot.",
+                    "cancelled": "Requests cancelled while queued or admitted."}
+        lines = []
+        with self.condition:
+            for kind, fields in (("gauge", gauges), ("counter", counters)):
+                for field, help_text in fields.items():
+                    name = "colibri_scheduler_" + field + ("_total" if kind == "counter" else "")
+                    value = len(self.queue) if field == "queued" else getattr(self, field)
+                    lines.extend((f"# HELP {name} {help_text}", f"# TYPE {name} {kind}",
+                                  f"{name} {value}"))
+            for field, help_text in (
+                    ("queue_wait_seconds", "Queue wait of admitted requests only."),
+                    ("slot_duration_seconds", "Slot occupancy of finished admitted requests, including errors and cancellation.")):
+                name = "colibri_scheduler_" + field
+                timing = self.timings[field]
+                lines.extend((f"# HELP {name} {help_text}", f"# TYPE {name} histogram"))
+                for bound, count in zip(self._buckets, timing["buckets"]):
+                    label = "+Inf" if math.isinf(bound) else str(bound)
+                    lines.append(f'{name}_bucket{{le="{label}"}} {count}')
+                lines.extend((f'{name}_sum {timing["sum"]}',
+                              f'{name}_count {timing["buckets"][-1]}'))
+        return "\n".join(lines) + "\n"
 
     def close(self):
         with self.condition:
@@ -3886,6 +3933,16 @@ class APIHandler(BaseHTTPRequestHandler):
         try:
             self._check_host()
             path = urlsplit(self.path).path
+            if path == "/metrics":
+                self.require_auth()
+                data = self.server.scheduler.prometheus().encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if path == "/health":
                 # Liveness is always public; hardware/scheduler internals only when a
                 # request is authed (or no key set), so a configured key isn't leaked

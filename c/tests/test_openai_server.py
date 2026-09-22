@@ -533,6 +533,48 @@ class ProtocolTest(unittest.TestCase):
 
 
 class SchedulerTest(unittest.TestCase):
+    def test_engine_failure_is_not_a_completed_request(self):
+        scheduler = GenerationScheduler()
+        with self.assertRaisesRegex(RuntimeError, "engine failed"):
+            with scheduler.admit():
+                raise RuntimeError("engine failed")
+        stats = scheduler.snapshot()
+        self.assertEqual(stats["failed"], 1)
+        self.assertEqual(stats["completed"], 0)
+        self.assertEqual(stats["active"], 0)
+        with scheduler.admit():
+            pass
+        self.assertEqual(scheduler.snapshot()["completed"], 1)
+
+    def test_prometheus_histograms_measure_admission_and_slot_occupancy(self):
+        scheduler = GenerationScheduler()
+        with patch("openai_server.time.monotonic", side_effect=[10, 10.25, 12.25]):
+            with scheduler.admit():
+                active = scheduler.prometheus()
+                self.assertIn("colibri_scheduler_active 1\n", active)
+                self.assertIn("colibri_scheduler_slot_duration_seconds_count 0\n", active)
+        metrics = scheduler.prometheus()
+        self.assertIn("# TYPE colibri_scheduler_completed_total counter\n", metrics)
+        self.assertIn("colibri_scheduler_completed_total 1\n", metrics)
+        self.assertIn("colibri_scheduler_queue_wait_seconds_sum 0.25\n", metrics)
+        self.assertIn('colibri_scheduler_queue_wait_seconds_bucket{le="0.1"} 0\n', metrics)
+        self.assertIn('colibri_scheduler_queue_wait_seconds_bucket{le="0.5"} 1\n', metrics)
+        self.assertIn('colibri_scheduler_queue_wait_seconds_bucket{le="+Inf"} 1\n', metrics)
+        self.assertIn("colibri_scheduler_slot_duration_seconds_sum 2.0\n", metrics)
+        self.assertIn("colibri_scheduler_slot_duration_seconds_count 1\n", metrics)
+
+    def test_failed_and_cancelled_admissions_are_timed(self):
+        scheduler = GenerationScheduler()
+        for error in (RuntimeError("failed"), ClientCancelled()):
+            with self.assertRaises(type(error)):
+                with scheduler.admit():
+                    raise error
+        metrics = scheduler.prometheus()
+        self.assertIn("colibri_scheduler_failed_total 1\n", metrics)
+        self.assertIn("colibri_scheduler_cancelled_total 1\n", metrics)
+        self.assertIn("colibri_scheduler_completed_total 0\n", metrics)
+        self.assertIn("colibri_scheduler_slot_duration_seconds_count 2\n", metrics)
+
     def test_admits_up_to_capacity_without_serializing(self):
         scheduler = GenerationScheduler(max_queue=0, queue_timeout=1, capacity=2)
         with scheduler.admit() as first:
@@ -1343,6 +1385,41 @@ class HTTPTest(unittest.TestCase):
             self.assertEqual(json.load(response)["data"][0]["id"], "test-model")
         with self.assertRaises(HTTPError) as caught:
             self.request("/v1/models", key="wrong")
+        self.addCleanup(caught.exception.close)
+        self.assertEqual(caught.exception.code, 401)
+
+    def test_metrics_counts_http_engine_failure_without_success(self):
+        before = self.server.scheduler.snapshot()
+        with patch.object(self.engine, "generate", side_effect=RuntimeError("injected failure")):
+            with self.assertRaises(HTTPError) as caught:
+                self.request("/v1/chat/completions", {
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "hello"}], "max_tokens": 1})
+        self.addCleanup(caught.exception.close)
+        self.assertEqual(caught.exception.code, 500)
+        after = self.server.scheduler.snapshot()
+        self.assertEqual(after["failed"], before["failed"] + 1)
+        self.assertEqual(after["completed"], before["completed"])
+        with self.request("/metrics") as response:
+            text = response.read().decode()
+        self.assertIn(f'colibri_scheduler_failed_total {after["failed"]}\n', text)
+        self.assertIn("colibri_scheduler_active 0\n", text)
+
+    def test_metrics_exposes_prometheus_text_with_auth(self):
+        with self.request("/metrics") as response:
+            self.assertEqual(response.headers["Content-Type"],
+                             "text/plain; version=0.0.4; charset=utf-8")
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+            text = response.read().decode()
+        self.assertIn("colibri_scheduler_capacity 2\n", text)
+        self.assertIn("# TYPE colibri_scheduler_queue_wait_seconds histogram\n", text)
+        for key in ("wrong", ""):
+            with self.assertRaises(HTTPError) as caught:
+                self.request("/metrics", key=key)
+            self.addCleanup(caught.exception.close)
+            self.assertEqual(caught.exception.code, 401)
+        with self.assertRaises(HTTPError) as caught:
+            urlopen(self.base + "/metrics", timeout=2)
         self.addCleanup(caught.exception.close)
         self.assertEqual(caught.exception.code, 401)
 

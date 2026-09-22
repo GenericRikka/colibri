@@ -99,6 +99,46 @@ errors before streaming headers are sent. `GET /health` exposes
 active/queued/completed/rejected counters, and successful generation responses
 include `x-colibri-queue-wait-ms`.
 
+## Prometheus metrics
+
+`GET /metrics` returns Prometheus text exposition (version 0.0.4). When an
+API key is configured, supply the same `Authorization: Bearer ...` or
+`x-api-key` header used for generation; missing or invalid credentials return
+401. Without an API key, the endpoint follows the server's usual unauthenticated
+access policy. Metrics contain no prompts, model paths, or request-ID labels.
+
+All names start with `colibri_scheduler_`:
+
+| Suffix | Type | Meaning |
+|---|---|---|
+| `active`, `queued`, `capacity`, `max_queue` | gauge | Admitted requests, waiters, KV slot capacity, and queue limit |
+| `admitted_total` | counter | Requests admitted to a KV slot |
+| `completed_total` | counter | Admitted requests that returned normally |
+| `failed_total` | counter | Admitted requests that raised an error, excluding `ClientCancelled` |
+| `rejected_total`, `timed_out_total` | counter | Queue-full refusals and queue timeouts |
+| `cancelled_total` | counter | Cancellations while queued or admitted |
+| `queue_wait_seconds` | histogram | Wait until admission, for admitted requests only |
+| `slot_duration_seconds` | histogram | Slot occupancy until completion, failure, or cancellation |
+
+Histogram buckets are 0.001, 0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30, 60, 300 seconds,
+and `+Inf`; each histogram exposes `_bucket`, `_sum`, and `_count`.
+Counters reset when the gateway restarts. Collection does not call the engine
+or consume a generation slot. `failed` is also included in `/health`'s
+authenticated scheduler snapshot; failures no longer increment `completed`.
+
+These are admission/slot metrics, not TTFT, per-token latency, or GPU kernel
+measurements. Slot occupancy includes any response handling while the slot is
+held. Validation/authentication failures before admission are not counted.
+`completed` means the admitted handler returned normally, not that the client
+received every response byte. Request exceptions can include client input or
+transport errors as well as engine failures.
+
+Example PromQL for the admitted-request queue-wait p95:
+
+```promql
+histogram_quantile(0.95, sum by (le) (rate(colibri_scheduler_queue_wait_seconds_bucket[5m])))
+```
+
 ## Anthropic-protocol endpoint (`/v1/messages`)
 
 The same server also speaks the **Anthropic Messages API**, so clients that only talk
