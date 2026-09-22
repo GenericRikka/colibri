@@ -110,9 +110,11 @@ void coli_cuda_stats(int device, size_t *count, size_t *bytes) {
  * device). Counted, never computed: the placement tests check WHERE work
  * went; the arithmetic has its own oracle in the CUDA build. Parameters are
  * unused on purpose (CFLAGS carry -Wno-unused-parameter). */
-static int fake_matmuls;
+static int fake_matmuls, fake_matmul_fail, fake_matmul_rows;
 int coli_cuda_matmul(ColiCudaTensor **tensor, float *y, const float *x, const void *weights, const float *scales, int fmt, int S, int I, int O, int device, int gs) {
     fake_matmuls++;
+    fake_matmul_rows = S;
+    if (fake_matmul_fail) return 0;
     ColiCudaTensor *t = tensor ? *tensor : NULL;
     if (fake_dense_compute && t && t->fmt == 1 && t->w && t->sc && t->I == I && t->O == O) {
         const int8_t *q = (const int8_t *)t->w;

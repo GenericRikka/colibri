@@ -33,7 +33,7 @@ static void ck(int ok, const char *what) {
 }
 
 /* Small but every dimension distinct, so a swapped I/O would show. */
-enum { NL = 2, D = 48, VH = 2, VD = 8, QH = 2, QD = 12, KVH = 1, KD = 8, SH = 20, NE = 4, IH = 16 };
+enum { NL = 2, D = 48, VH = 2, VD = 8, QH = 2, QD = 16, KVH = 1, KD = 8, SH = 20, NE = 4, IH = 16 };
 
 static unsigned g_seed = 12345;
 static float rnd(void) {
@@ -154,6 +154,39 @@ int main(void) {
         int served = 1; float x[D] = {0}, y[SH] = {0};
         served = qtd(at->qth_shd, y, x, SH, D);
         ck(!served, "a matrix with no handle is not served (the caller runs matmul_d)");
+    }
+
+    /* Drive attention itself: this catches an S==1 gate left at any of the
+     * four projection call sites, which a tier-only test cannot detect. */
+    {
+        enum { S = 3 };
+#ifdef _OPENMP
+        omp_set_num_threads(1);
+#endif
+        m.max_t = m.kv_cap = S;
+        m.K = calloc(NL, sizeof(float *)); m.V = calloc(NL, sizeof(float *));
+        m.K[1] = calloc(S * KVH * KD, sizeof(float));
+        m.V[1] = calloc(S * KVH * KD, sizeof(float));
+        m.attn_sc = calloc(S, sizeof(float));
+        float *x = rnd_matrix(S, D), gpu[S * D], cpu[S * D], fallback[S * D];
+        Layer host = *at;
+        host.qth_q = host.qth_k = host.qth_v = host.qth_o = 0;
+        attention(&m, &host, 1, x, S, 0, cpu);
+        int calls = fake_matmuls;
+        attention(&m, at, 1, x, S, 0, gpu);
+        ck(fake_matmuls == calls + 4 && fake_matmul_rows == S,
+           "prefill dispatches all four projections as batches");
+        fake_matmul_fail = 1;
+        attention(&m, at, 1, x, S, 0, fallback);
+        fake_matmul_fail = 0;
+        double gap = 0, scale = 1e-6;
+        for (int i = 0; i < S * D; i++) {
+            gap = fmax(gap, fabs((double)gpu[i] - cpu[i]));
+            gap = fmax(gap, fabs((double)fallback[i] - cpu[i]));
+            scale = fmax(scale, fabs(cpu[i]));
+        }
+        ck(gap / scale < 1e-4, "batch attention and failed-backend fallback agree with CPU");
+        free(x); free(m.K[1]); free(m.V[1]); free(m.K); free(m.V); free(m.attn_sc);
     }
 
     qt_shutdown();

@@ -801,12 +801,15 @@ int qt_dense_init(const int8_t *q, const float *sc, int I, int O, int device){
     G_dense_n++;
     return h;
 }
-int qt_dense_matmul(int h, float *y, const float *x, int I, int O){
-    if(h < 0 || h >= G_dense_n || !G_dense[h].on) return 0;
-    if(coli_cuda_matmul(&G_dense[h].t, y, x, NULL, NULL, 1, 1, I, O, G_dense[h].dev, 0)) return 1;
+int qt_dense_matmul_batch(int h, float *y, const float *x, int S, int I, int O){
+    if(h < 0 || h >= G_dense_n || !G_dense[h].on || S <= 0) return 0;
+    if(coli_cuda_matmul(&G_dense[h].t, y, x, NULL, NULL, 1, S, I, O, G_dense[h].dev, 0)) return 1;
     fprintf(stderr,"[dense] handle %d GPU matmul failed; CPU from here on\n", h);
     G_dense[h].on = 0;
     return 0;
+}
+int qt_dense_matmul(int h, float *y, const float *x, int I, int O){
+    return qt_dense_matmul_batch(h, y, x, 1, I, O);
 }
 int qt_dense_count(void){ return G_dense_n; }
 
