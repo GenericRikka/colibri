@@ -1144,9 +1144,13 @@ qwen38-ple-prefetch-check: qwen38-tiny-generate qwen38$(EXE)
 	done; done; done; \
 	[ $$fail -eq 0 ] && echo "PLE prefetch: identical tokens on and off, 16 configurations" || exit 1
 
+# Q38_TRUNK_MIN_KB=0 puts every dense matrix of the fixture (all under the
+# default 1 MiB threshold) on the int8 trunk with integer dot products, the
+# path the released checkpoint takes; 1024 leaves them BF16.
 qwen38-tiny-check: qwen38-tiny-generate qwen38$(EXE)
-	@for batch in 0 1; do for bf16 in 0 1; do for cap in 1 4; do \
-		Q38_PREFILL_BATCH=$$batch Q38_NATIVE_BF16=$$bf16 OMP_NUM_THREADS=2 SNAP=./qwen38_tiny ./qwen38$(EXE) $$cap 8 ./qwen38_tiny/ref.json || exit $$?; \
+	@for trunk in 1024 0; do for batch in 0 1; do for bf16 in 0 1; do for cap in 1 4; do \
+		Q38_TRUNK_MIN_KB=$$trunk Q38_PREFILL_BATCH=$$batch Q38_NATIVE_BF16=$$bf16 OMP_NUM_THREADS=2 SNAP=./qwen38_tiny ./qwen38$(EXE) $$cap 8 ./qwen38_tiny/ref.json || exit $$?; \
+	done; \
 	done; \
 	done; \
 	done
@@ -1160,8 +1164,9 @@ qwen38-tiny-fp8-generate:
 	$(PYTHON) tools/make_qwen38_tiny.py --out ./qwen38_tiny_fp8 --fp8-experts
 
 qwen38-tiny-fp8-check: qwen38-tiny-fp8-generate qwen38$(EXE)
-	@for native in 1 0; do for cap in 1 2; do \
-		Q38_NATIVE_FP8=$$native OMP_NUM_THREADS=2 SNAP=./qwen38_tiny_fp8 ./qwen38$(EXE) $$cap 8 ./qwen38_tiny_fp8/ref.json || exit $$?; \
+	@for trunk in 1024 0; do for native in 1 0; do for cap in 1 2; do \
+		Q38_TRUNK_MIN_KB=$$trunk Q38_NATIVE_FP8=$$native OMP_NUM_THREADS=2 SNAP=./qwen38_tiny_fp8 ./qwen38$(EXE) $$cap 8 ./qwen38_tiny_fp8/ref.json || exit $$?; \
+	done; \
 	done; \
 	done
 

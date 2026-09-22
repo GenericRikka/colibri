@@ -140,6 +140,7 @@ typedef struct {
     int native_fp8, native_bf16, expert_prefetch, expert_parallel_reads;
     int prefill_batch;
     uint64_t resident_weight_bytes;
+    int trunk_table_built;         /* q38_trunk_offer_all ran for this load (the table is process-wide, the model is not) */
     double dense_load_s;
     /* vision. `vis_map` mappa la posizione ASSOLUTA nella sequenza alla riga di
      * `vis_rows`, oppure -1. Assoluta e non relativa al chunk: il prefill arriva
@@ -1827,7 +1828,7 @@ static int q38_trunk_enabled(void) {
  * The same table feeds the CPU's int8 rows; the placer is told about the
  * matrices only when the GPU trunk is enabled (Q38_TRUNK_GPU). */
 static void q38_trunk_offer_all(Model *m) {
-    if(g_trunk_n)return;
+    g_trunk_n=0; m->trunk_table_built=1;          /* rebuilt per load: a test opens several models in one process */
     g_trunk_offer_gpu=q38_trunk_enabled();
     Cfg *c=&m->c;
     q38_trunk_add(&m->lm_head,"lmhead",0);
@@ -1879,7 +1880,7 @@ static int q38_trunk_cpu_int8_wanted(void) {
 }
 static void q38_trunk_cpu_int8(Model *m) {
     if(!q38_trunk_cpu_int8_wanted())return;
-    q38_trunk_offer_all(m);
+    if(!m->trunk_table_built)q38_trunk_offer_all(m);   /* the tier may have built it already */
     double t0=now_s(); size_t bytes=0,released=0; int n=0;
     for(int i=0;i<g_trunk_n;i++){
         Q38Weight *w=g_trunk[i].w;
