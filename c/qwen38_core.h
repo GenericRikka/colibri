@@ -9,6 +9,7 @@
  */
 #ifndef COLI_QWEN38_CORE_H
 #define COLI_QWEN38_CORE_H
+#include "kv_prefix.h"
 #include <pthread.h>   /* q38_ehit_mark publishes the lazy HITS table under a lock */
 
 #define Q38_MAX_LAYERS 512
@@ -127,6 +128,7 @@ typedef struct {
     float **DN_rec, **DN_conv;
     float **K, **V, **IK;
     int kv_len, kv_cap, max_t;
+    kv_prefix kvp; /* token identity of the live attention rows, not a snapshot */
     st_tensor *ple_parts[Q38_MAX_PLE_PARTS];
     char ple_part_names[Q38_MAX_PLE_PARTS][320];
     int64_t ple_part_start[Q38_MAX_PLE_PARTS + 1];
@@ -2220,6 +2222,7 @@ static void q38_moe(Model *m,Layer *l,int layer,const float *x,int S,float *out)
 }
 
 static void reset_recurrent(Model *m) {
+    kv_prefix_clear(&m->kvp);
     Cfg *c=&m->c;
     for(int i=0;i<c->layers;i++)if(!c->is_attn[i]){
         memset(m->DN_rec[i],0,(size_t)c->dn_vheads*c->dn_kdim*c->dn_vdim*sizeof(float));
@@ -2236,6 +2239,7 @@ static void ensure_kv(Model *m) {
         m->K[i]=falloc((int64_t)c->kv_heads*m->max_t*c->head_dim);m->V[i]=falloc((int64_t)c->kv_heads*m->max_t*c->head_dim);m->IK[i]=falloc((int64_t)m->max_t*c->idx_dim);
     }
     m->kv_cap=m->max_t;
+    kv_prefix_alloc(&m->kvp,m->kv_cap); /* ensure_kv discards the old rows */
 }
 
 /* Run only the requested native layer interval over hyper-residual activations.
@@ -2316,6 +2320,10 @@ static float *step(Model *m,const int *ids,int S,int pos_base) {
         q38_gr_read(m,&l->mlp_gr,hyper,S,mixed,inject);q38_moe(m,l,i,mixed,S,block);q38_gr_apply(c,hyper,block,inject,S);
     }
     q38_gr_read(m,&m->final_gr,hyper,S,mixed,NULL);m->kv_len=pos_base+S;
+    /* Rewinding and writing a shorter branch invalidates its old tail. */
+    if(m->kvp.len>pos_base)m->kvp.len=pos_base;
+    kv_prefix_record(&m->kvp,ids,pos_base,S);
+    if(m->vis_map && m->vis_rows_n>0)kv_prefix_taint(&m->kvp);
     float *logit=falloc(c->vocab);double phase_started=now_s();
     /* Lettura del prefill: la posizione p predice il token p+1. Il primo token
      * fresco lo predice la fotografia del prefisso, quando c'e. Pagata solo da
@@ -2400,6 +2408,7 @@ static void q38_layer_free(Layer *l) {
 
 static void q38_model_free(Model *m) {
     if(!m) return;
+    kv_prefix_free(&m->kvp);
     for(int i=0;i<m->c.layers;i++) {
         if(m->L)q38_layer_free(&m->L[i]);
         if(m->cache) {
