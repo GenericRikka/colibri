@@ -5,7 +5,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [1.12.1] — 2026-09-22
 
-52 pull requests since v1.12.0, 41 of them from contributors. Two tokenizers
+53 pull requests since v1.12.0, 41 of them from contributors. Two tokenizers
 brought back to the reference, brio on the ninth engine, `coli chat` working
 again at the default context on two families, and a placement decision that
 is now measured on the card in front of it instead of predicted.
@@ -184,6 +184,12 @@ is now measured on the card in front of it instead of predicted.
   with zero errors and zero bytes leaked.
 - **#1669**: `test_systemone_api` imports its scoring engine relative to
   its package, so an installed `tests` package no longer breaks discovery.
+- **#1691**: the installed launcher invoked as `/bin/coli` or `/sbin/coli`
+  on a merged-/usr system derived `/libexec/colibri` instead of
+  `/usr/libexec/colibri`, because `abspath` kept the alias (#1689,
+  florin65's patch): `realpath` first. A test runs the launcher through
+  such an alias, and another checks that every root module the launcher
+  reaches is in the `make install` list, the gap #1610 closed by hand.
 
 ### Tools and the gateway
 
