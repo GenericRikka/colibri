@@ -275,10 +275,14 @@ class BenchmarkTest(unittest.TestCase):
 class ColibriIntegrationTest(unittest.TestCase):
     def test_real_gateway_with_fake_engine(self):
         class Engine:
+            fail = False
+
             def generate(self, prompt, maximum, temperature, top_p, on_text,
                          cache_slot=0, cancelled=None, **kwargs):
                 kwargs["on_accept"]({"prompt_tokens": 7})
                 on_text("Hello")
+                if self.fail:
+                    raise RuntimeError("private engine diagnostic")
                 return {"prompt_tokens": 7, "completion_tokens": 1, "length_limited": False}
 
         server = APIServer(("127.0.0.1", 0), Engine(), "fixture", api_key="test-secret")
@@ -293,6 +297,25 @@ class ColibriIntegrationTest(unittest.TestCase):
             self.assertEqual(summary["reported_successful_completion_tokens"], 2)
             self.assertEqual(summary["successful_first_output_seconds"]["count"], 2)
             self.assertNotIn("test-secret", json.dumps(rows))
+            server.engine.fail = True
+            failed = bench.request_one(
+                f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                dict(messages=[{"role": "user", "content": "Hi"}], model="fixture", stream=True),
+                "test-secret", 2, 2, time.perf_counter())
+            self.assertFalse(failed["success"], failed)
+            self.assertIsNotNone(failed["first_output_seconds"])
+            self.assertIsNone(failed["finish_reason"])
+            self.assertNotIn("private engine diagnostic", json.dumps(failed))
+            summary = bench.summarize(rows + [failed], 1, slo_duration=5)
+            self.assertEqual((summary["succeeded"], summary["failed"]), (2, 1))
+            self.assertEqual(summary["reported_successful_completion_tokens"], 2)
+            self.assertEqual(summary["latency_slo"]["requests_met"], 2)
+            server.engine.fail = False
+            recovered, _ = bench.run(
+                f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                [{"messages": [{"role": "user", "content": "Hi again"}]}],
+                "fixture", 1, 1, 8, 0, "test-secret", 2)
+            self.assertTrue(recovered[0]["success"], recovered)
         finally:
             server.shutdown()
             server.server_close()
