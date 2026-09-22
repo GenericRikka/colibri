@@ -51,5 +51,8 @@ int main() {
                  check_case(3, 33, 65, 4.f, 3.f) |
                  check_case(2, 129, 31, 0.5f, 0.75f);
     coli_cuda_shutdown();
+    if (!coli_cuda_init(&device, 1)) return 1;
+    failed |= check_case(1, 64, 128, 1.5f, 2.5f);
+    coli_cuda_shutdown();
     return failed;
 }
