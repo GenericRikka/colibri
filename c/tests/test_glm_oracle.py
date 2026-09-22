@@ -200,12 +200,28 @@ class GlmOracleTest(unittest.TestCase):
                             self.assert_failed(self.run_oracle(raw=invalid, tf=tf, strict=strict))
 
     def test_other_modes_cannot_bypass_strict_comparison(self):
-        for mode in ("REPLAY", "SERVE", "SCORE", "ABLATE_SCORE", "EXPERT_WORKER",
+        for mode in ("REPLAY", "CONSIST", "SERVE", "SCORE", "ABLATE_SCORE", "EXPERT_WORKER",
                      "I4_ACC512_TEST", "I3_AVX512_TEST", "COLI_ANS_PACK", "COLI_PROMPT"):
             with self.subTest(mode=mode):
                 result = self.run_oracle(extra_env={mode: "1"})
                 self.assert_failed(result)
                 self.assertIn("ORACLE_STRICT", result.stderr)
+
+    def test_reference_diagnostics_remain_available_without_strict(self):
+        # REPLAY and CONSIST use the reference token sequence, not predictions,
+        # and retain their upstream precedence over TF when both are selected.
+        ref = copy.deepcopy(self.reference)
+        del ref["tf_pred"]
+        for mode, marker in (("REPLAY", "REPLAY decode:"), ("CONSIST", "CONSIST OK")):
+            for strict in (None, "0"):
+                for tf in (False, True):
+                    with self.subTest(mode=mode, strict=strict, tf=tf):
+                        result = self.run_oracle(ref, tf=tf, strict=strict,
+                                                 extra_env={mode: "1"})
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                        self.assertIn(marker, result.stdout)
+                        self.assertNotIn("C vs oracle:", result.stdout)
+                        self.assertNotIn("Matching tokens:", result.stdout)
 
     def test_nonfinite_model_logits_fail_both_modes(self):
         # The tiny generator stores an F32 lm_head in one safetensors shard.

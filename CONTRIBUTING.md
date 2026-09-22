@@ -32,7 +32,7 @@ output and incomplete generation fail regardless of the mismatch allowance.
 Invalid reference arrays/JSON fail in either mode.
 Without strict mode (or with `ORACLE_STRICT=0`), a completed comparison remains
 report-only for diagnostic/benchmark callers; its exit status is not a correctness
-gate. Strict mode rejects `REPLAY`, serving, text generation, and other execution
+gate. Strict mode rejects `REPLAY`, `CONSIST`, serving, text generation, and other execution
 modes that would bypass the comparison.
 
 `ORACLE_TF_MAX_MISMATCHES` is a nonnegative integer smaller than the number of
