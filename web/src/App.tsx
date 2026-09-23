@@ -30,6 +30,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { getHealth, listModels, streamChat, type ChatMessage, type HealthResponse, type StreamChatResult } from "@/lib/api"
+import { resendFrom } from "@/lib/chat"
 import { activeRequests, supportsCacheSlots } from "@/lib/runtime"
 import Brio from "./Brio"
 import { BrainWorkspace } from "./BrainWorkspace"
@@ -209,14 +210,17 @@ export default function App() {
 
   const canSend = useMemo(() => (draft.trim() || pending.length) && model && !loading, [draft, loading, model, pending])
 
-  const send = async (text = draft, previous = messages, pictures = pending) => {
+  /* consumeDraft is false for regenerate so a follow-up already in the composer is not eaten. */
+  const send = async (text = draft, previous = messages, pictures = pending, consumeDraft = true) => {
     const content = text.trim()
     if ((!content && !pictures.length) || loading) return
     const user = message("user", content, pictures)
     const assistant = message("assistant", "")
     const history = [...previous, user]
-    setDraft("")
-    setPending([])
+    if (consumeDraft) {
+      setDraft("")
+      setPending([])
+    }
     setError("")
     updateMessages([...history, assistant])
     setLoading(true)
@@ -427,7 +431,7 @@ export default function App() {
                   <div className="reasoning-body">{item.reasoning}</div>
                 </details>
               : null}{item.content ? (item.role === "assistant" ? <Markdown text={item.content} /> : item.content) : <span className="typing" aria-label={t("ui.generating")}><i /><i /><i /></span>}</div>
-            {item.role === "assistant" && item.content && <div className="message-actions"><button className="icon-action" aria-label={t("ui.copy")} title={t("ui.copy")} onClick={() => void copyMessage(item)}><Copy /></button>{copied === item.id && <span role="status">{t("ui.copied")}</span>}{index === messages.length - 1 && !loading && <button className="icon-action" aria-label={t("ui.regenerate")} title={t("ui.regenerate")} onClick={() => { const userIndex = messages.map((m, i) => m.role === "user" && i < index ? i : -1).reduce((a, b) => Math.max(a, b), -1); if (userIndex >= 0) void send(messages[userIndex].content, messages.slice(0, userIndex)) }}><RefreshCw /></button>}</div>}
+            {item.role === "assistant" && item.content && <div className="message-actions"><button className="icon-action" aria-label={t("ui.copy")} title={t("ui.copy")} onClick={() => void copyMessage(item)}><Copy /></button>{copied === item.id && <span role="status">{t("ui.copied")}</span>}{index === messages.length - 1 && !loading && <button className="icon-action" aria-label={t("ui.regenerate")} title={t("ui.regenerate")} onClick={() => { const retry = resendFrom(messages, index); if (retry) void send(retry.text, retry.previous, retry.pictures, false) }}><RefreshCw /></button>}</div>}
           </article>)}<div ref={bottomRef} /></div>
         </div>}
         <div className="composer-wrap">
