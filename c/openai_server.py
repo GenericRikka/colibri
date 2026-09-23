@@ -2185,7 +2185,7 @@ def render_chat_glm53(messages, enable_thinking=False, reasoning_effort=None, to
     so the existing parser needs nothing added for this family.
 
     The whole thing is pinned byte for byte against chat_template.jinja rendered
-    with jinja2 (tests/test_glm53_chat_template.py). Getting the prompt nearly
+    with jinja2 (tests/glm53_chat_template_harness.py). Getting the prompt nearly
     right is the failure mode worth guarding: the model answers either way.
     """
     if not isinstance(messages, list) or not messages:
@@ -2483,7 +2483,7 @@ def render_chat_dsv41(messages, enable_thinking=False, reasoning_effort=None, to
 #
 # llama.cpp needs no switch for this because it runs the checkpoint's jinja at request time,
 # so `add_generation_prompt=False` costs it nothing. This gateway renders by hand, on purpose
-# and for speed (tests/test_glm53_chat_template.py says why), and the bill for that choice is
+# and for speed (tests/glm53_chat_template_harness.py says why), and the bill for that choice is
 # exactly here: one template flag, one open-turn shape to derive per renderer. Each string
 # renderer derives its own, pinned byte-for-byte against the checkpoint's template;
 # CONTINUATION_FAMILIES is the set that has done so. Kimi K3 differs in WHERE its shape lives:
