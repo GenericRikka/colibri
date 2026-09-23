@@ -42,9 +42,9 @@ own verification anchor in its sources bullet): the
 stamp+registry series (#529) stacked directly on the fp8-passthrough series
 (#528), which is in turn based on dev `292ed4c` (post-#465, post-#457
 Metal grouped-GEMV merge, post-#705 Vulkan/Kimi-K3 MXFP4 merge) — no
-cross-tree line-number mixing. Every `c/colibri.c`/`c/quant.h` line number
-in this document reflects that restack; re-verify them again if this branch
-is rebased further. The fmt=6 and fmt=7 rows are upstream's own merged code
+cross-tree mixing. Every `c/colibri.c`/`c/quant.h` symbol named in this
+document is verified present at this branch's own head. The fmt=6 and
+fmt=7 rows are upstream's own merged code
 (this branch's only fmt=6-adjacent change is the collision handling inside
 `qt_resolve_fmt`, `c/colibri.c`; it does not touch fmt=7/MXFP4 at all).
 
@@ -100,9 +100,10 @@ shared per-layer predicate `metal_fused_layer_fmt_miss`, over the
 `attention_rows` and `layer_forward_rows` — and by the load-time notice
 `metal_fmt_gate_notice`, called from `model_init`.
 
-Sources for all rows (`c/quant.h`/`c/colibri.c` line numbers verified at
-this branch's own head -- originally written against base dev `292ed4c`,
-re-anchored here because line numbers rot with the file, not the base):
+Sources for all rows (`c/quant.h`/`c/colibri.c` symbols named below,
+verified present at this branch's own head -- originally identified
+against base dev `292ed4c`, reconfirmed here against the current
+restack):
 
 - **fmt=0/1/2/3** — allocation policy: `qt_alloc`, `c/colibri.c`
   (`bits>=16→fmt=0`, `bits>=5→fmt=1`, `bits>=4→fmt=2`, else `fmt=3`).
@@ -153,9 +154,9 @@ re-anchored here because line numbers rot with the file, not the base):
   override that default — see "The metadata stamp" below for the exact
   rule in both cases. FMT_NAMES table (`name string` to `fmt int`):
   `c/colibri.c`.
-- **no ordinal** (`int4-rans256-g0`, merged tools-only tier — line numbers
-  at dev `7fb1159`, post-#671 merge `a3a5a75`, not at this PR pair's
-  restack base) — codec + record reader/writer: `c/rans.h`
+- **no ordinal** (`int4-rans256-g0`, merged tools-only tier — symbols
+  verified at dev `7fb1159`, post-#671 merge `a3a5a75`, not at this PR
+  pair's restack base) — codec + record reader/writer: `c/rans.h`
   (`RANS_NSTREAMS 256`, `c/rans.h`; the record layout in the file-header
   comment, `c/rans.h`; that same header names its engine consumer
   "a future engine decode stage", `c/rans.h` — the format's own statement
