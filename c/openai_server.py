@@ -392,6 +392,21 @@ def _tool_choice_name(tool_choice):
             or tool_choice.get("name"))
 
 
+def _tool_function(tool):
+    """The function object on a tools[] entry, or {} if it is missing or not an object.
+
+    OpenAI dual spelling: {"function": {"name": ...}} or a bare function object.
+    .items() is taken only from a dict. Writing the name where the object goes
+    ({"type": "function", "function": "search"}) raised AttributeError in the GLM
+    and DeepSeek declaration blocks, and do_POST answered HTTP 500 "The colibri
+    engine failed to process the request." for a payload generation_options()
+    already has a 400 for. Same shape as the tool_choice fix (#1598): read the
+    member, then check it.
+    """
+    fn = tool.get("function", tool) if isinstance(tool, dict) else {}
+    return fn if isinstance(fn, dict) else {}
+
+
 def _tool_param_order(tools):
     """name -> ordered param names (required first) from the request schema, for de-mangling."""
     out = {}
@@ -564,7 +579,7 @@ def _dsv4_tools_block(tools):
     """V4 tool-declaration block, rendered by the vendored reference template."""
     schemas = []
     for tool in (tools or []):
-        fn = tool.get("function", tool) if isinstance(tool, dict) else {}
+        fn = _tool_function(tool)
         # Gateway-side scrub: OpenAI clients attach routing hints the model
         # schema must not carry.
         schemas.append({k: v for k, v in fn.items() if k not in ("defer_loading", "strict")})
@@ -1798,7 +1813,7 @@ def render_chat(messages, enable_thinking=False, reasoning_effort=None, tools=No
                       "user query.\n\nYou are provided with function signatures within <tools></tools> "
                       "XML tags:\n<tools>\n")
         for tool in tools:
-            fn = tool.get("function", tool) if isinstance(tool, dict) else {}
+            fn = _tool_function(tool)
             clean = {k: v for k, v in fn.items() if k not in ("defer_loading", "strict")}
             prompt.append(json.dumps(clean, ensure_ascii=False) + "\n")
         prompt.append("</tools>\n\nFor each function call, output the function name and arguments "
@@ -2124,8 +2139,7 @@ def _glm53_tool_block(tools):
     somiglia a quello dell'addestramento non e' quello dell'addestramento."""
     body = "".join(f"\n{_glm53_tool_json(tool)}\n\n"
                    for tool in tools
-                   if not (isinstance(tool, dict)
-                           and (tool.get("function", tool) or {}).get("defer_loading")))
+                   if not _tool_function(tool).get("defer_loading"))
     return GLM53_TOOL_PREAMBLE + body + GLM53_TOOL_EPILOGUE
 
 
@@ -2305,7 +2319,7 @@ def _dsv41_tools_block(tools):
     """V4.1 tool-declaration block, rendered by the vendored reference template."""
     schemas = []
     for tool in (tools or []):
-        fn = tool.get("function", tool) if isinstance(tool, dict) else {}
+        fn = _tool_function(tool)
         # Gateway-side scrub: OpenAI clients attach routing hints the model
         # schema must not carry.
         clean = {k: v for k, v in fn.items() if k not in ("defer_loading", "strict")}

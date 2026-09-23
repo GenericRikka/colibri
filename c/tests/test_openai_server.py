@@ -458,6 +458,33 @@ class TemplateTest(unittest.TestCase):
                               render_chat(list(messages), tools=list(tools),
                                           tool_choice=choice))
 
+    def test_tool_function_that_is_not_an_object_is_a_400(self):
+        """The same slip as tool_choice, on tools[] this time.
+
+        generation_options already has 400 "Tool function must be an object".
+        The GLM and DeepSeek declaration blocks then did fn.items() on
+        {"type": "function", "function": "search"} and raised AttributeError
+        before that 400 ran, so do_POST answered 500 "engine failed".
+        """
+        import openai_server as srv
+        messages = [{"role": "user", "content": "hi"}]
+        for function in ("search", ["search"], 5, True):
+            with self.subTest(function=function):
+                tools = [{"type": "function", "function": function}]
+                with self.assertRaises(APIError) as caught:
+                    generation_options({"tools": tools}, 8)
+                self.assertEqual(caught.exception.status, 400)
+                self.assertEqual(caught.exception.param, "tools.0.function")
+                for render in (render_chat, srv.render_chat_glm53, render_chat_kimi,
+                               render_chat_v4, srv.render_chat_dsv41):
+                    try:
+                        render(list(messages), tools=list(tools))
+                    except APIError as error:
+                        self.assertEqual(error.status, 400)
+        well = [{"type": "function", "function": {"name": "search"}}]
+        generation_options({"tools": well}, 8)
+        self.assertIn('"name": "search"', render_chat(list(messages), tools=well))
+
     def test_coli_temp_is_the_default_for_requests_that_omit_temperature(self):
         with patch.dict("openai_server.os.environ", {"COLI_TEMP": "0.25"}):
             self.assertEqual(generation_options({}, 8)[1], 0.25)
@@ -1979,6 +2006,44 @@ class HTTPTest(unittest.TestCase):
                 "tool_choice": {"type": "function", "name": "search"}}) as response:
             self.assertEqual(response.status, 200)
         self.assertIn("You must call the function `search`", self.engine.calls[-1][0])
+
+    def test_tool_with_a_non_object_function_is_a_client_error(self):
+        """{"type": "function", "function": "search"} on tools[] answered HTTP 500.
+
+        generation_options already has the 400, but /v1/chat/completions renders
+        first. GLM, GLM-5.3, DeepSeek V4 and V4.1 did fn.items() on a string
+        and the AttributeError became do_POST's 500 "The colibri engine failed
+        to process the request." for a request the engine never saw.
+        """
+        for arch in ("glm", "glm53", "kimi", "deepseek_v4", "deepseek_v41",
+                     "olmoe", "inkling", "qwen36", "qwen38"):
+            for function in ("search", ["search"], 5):
+                with self.subTest(arch=arch, function=function):
+                    with patch("openai_server.ARCH", arch):
+                        with self.assertRaises(HTTPError) as caught:
+                            self.request("/v1/chat/completions", {
+                                "model": "test-model",
+                                "messages": [{"role": "user", "content": "hi"}],
+                                "tools": [{"type": "function",
+                                           "function": function}]})
+                    self.addCleanup(caught.exception.close)
+                    self.assertEqual(caught.exception.code, 400)
+        with self.assertRaises(HTTPError) as caught:
+            self.request("/v1/completions", {
+                "model": "test-model", "prompt": "hi",
+                "tools": [{"type": "function", "function": "search"}]})
+        self.addCleanup(caught.exception.close)
+        self.assertEqual(caught.exception.code, 400)
+
+    def test_a_well_formed_tool_function_still_runs(self):
+        """The read above must not change the shape clients actually send."""
+        with self.request("/v1/chat/completions", {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [{"type": "function",
+                           "function": {"name": "search"}}]}) as response:
+            self.assertEqual(response.status, 200)
+        self.assertIn('"name": "search"', self.engine.calls[-1][0])
 
     def test_tool_call_arguments_that_are_not_an_object_do_not_fail_the_request(self):
         """A replayed tool call with `arguments: "[1, 2]"` answered HTTP 500.
