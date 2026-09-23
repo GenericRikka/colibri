@@ -17,63 +17,9 @@
 #include "idot.h"   /* SIMD prelude + the integer dot kernels, shared with qwen36 */
 
 #if defined(__SSE4_1__)
-#include <immintrin.h>
 #include "sse41_kernels.h"
 #endif
 
-#if defined(__SSE4_1__) && !defined(__AVX2__)
-/* Load one packed byte from each of four output rows, then unpack their low and
- * high offset nibbles into four f32 lanes. Keeping independent output rows in
- * the lanes preserves the scalar operation order within every row. */
-static inline void colibri_i4_rows4(const uint8_t *q4,int rb,int o,int byte,
-                                    __m128 *lo,__m128 *hi){
-    const __m128i m4=_mm_set1_epi8(0x0F), b8=_mm_set1_epi8(8);
-    uint32_t packed=(uint32_t)q4[(int64_t)(o+0)*rb+byte]
-                   |(uint32_t)q4[(int64_t)(o+1)*rb+byte]<<8
-                   |(uint32_t)q4[(int64_t)(o+2)*rb+byte]<<16
-                   |(uint32_t)q4[(int64_t)(o+3)*rb+byte]<<24;
-    __m128i by=_mm_cvtsi32_si128((int)packed);
-    __m128i qlo=_mm_sub_epi8(_mm_and_si128(by,m4),b8);
-    __m128i qhi=_mm_sub_epi8(_mm_and_si128(_mm_srli_epi16(by,4),m4),b8);
-    *lo=_mm_cvtepi32_ps(_mm_cvtepi8_epi32(qlo));
-    *hi=_mm_cvtepi32_ps(_mm_cvtepi8_epi32(qhi));
-}
-
-static inline __m128 colibri_f32_rows4(const float *p,int stride,int o,int i){
-    return _mm_set_ps(p[(int64_t)(o+3)*stride+i],p[(int64_t)(o+2)*stride+i],
-                      p[(int64_t)(o+1)*stride+i],p[(int64_t)(o+0)*stride+i]);
-}
-
-/* Process four output rows at once without a horizontal reduction. Each lane
- * uses the scalar kernel's pair sum, scale multiply, and accumulator add in
- * the same order, so the result can remain byte-identical on pre-FMA CPUs. */
-static void matmul_i4_grouped_sse41_rows4(float *y,const float *x,
-                                           const uint8_t *q4,const float *scale,
-                                           int S,int I,int O,int gs,int rb,int ng,
-                                           int o4){
-    #pragma omp parallel for schedule(static)
-    for(int o=0;o<o4;o+=4){
-        for(int s=0;s<S;s++){
-            const float *xs=x+(int64_t)s*I; __m128 a=_mm_setzero_ps();
-            for(int g=0;g*gs<I;g++){
-                int base=g*gs,end=base+gs; if(end>I) end=I;
-                __m128 sc=colibri_f32_rows4(scale,ng,o,g); int i=base;
-                for(;i+1<end;i+=2){
-                    __m128 lo,hi; colibri_i4_rows4(q4,rb,o,i>>1,&lo,&hi);
-                    __m128 pair=_mm_add_ps(_mm_mul_ps(_mm_set1_ps(xs[i]),lo),
-                                           _mm_mul_ps(_mm_set1_ps(xs[i+1]),hi));
-                    a=_mm_add_ps(a,_mm_mul_ps(pair,sc));
-                }
-                if(i<end){
-                    __m128 lo,hi; colibri_i4_rows4(q4,rb,o,i>>1,&lo,&hi); (void)hi;
-                    a=_mm_add_ps(a,_mm_mul_ps(_mm_mul_ps(_mm_set1_ps(xs[i]),lo),sc));
-                }
-            }
-            colibri_sse41_storeu_ps(y+(int64_t)s*O+o,a);
-        }
-    }
-}
-#endif
 /* ---- AVX-512 int4->float accumulator -------------------------------------- */
 #if defined(__AVX512F__) && defined(__AVX512BW__)
 static int g_i4_acc512=1;

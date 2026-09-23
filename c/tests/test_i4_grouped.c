@@ -199,6 +199,8 @@ static int check_pair(const char *name, int S, int I, int O, int gs){
     int require_exact=I%gs==0;
 #ifdef COLI_I4_GROUPED_SCALAR_EXACT
     require_exact=1;
+    exact=memcmp(yg,rg,(size_t)S*O*sizeof(float))==0
+       && memcmp(yu,ru,(size_t)S*O*sizeof(float))==0;
 #endif
     if(require_exact && !exact){
         fprintf(stderr,"%s: FAIL fused != unfused bitwise "
@@ -214,9 +216,47 @@ static int check_pair(const char *name, int S, int I, int O, int gs){
 }
 #endif
 
+#if defined(__SSE4_1__) && !defined(__AVX2__)
+/* Exercise every packed byte in every lane, with tight and strided rows.
+ * The last byte of the last row sits at the allocation boundary so ASan also
+ * catches a wider load that would read beyond the packed matrix. */
+static int check_rows4_unpack(void){
+    const int strides[]={1,3}, offsets[]={0,1};
+    for(int c=0;c<2;c++){
+        int rb=strides[c],o=offsets[c];
+        size_t n=(size_t)(o+4)*rb;
+        uint8_t *q4=malloc(n);
+        if(!q4){ fprintf(stderr,"rows4 unpack: OOM\n"); return 1; }
+        for(int value=0;value<256;value++){
+            for(size_t i=0;i<n;i++) q4[i]=(uint8_t)(value+37*i);
+            for(int byte=0;byte<rb;byte++){
+                __m128 lo,hi; float l[4],h[4];
+                colibri_sse41_i4_rows4(q4,rb,o,byte,&lo,&hi);
+                _mm_storeu_ps(l,lo); _mm_storeu_ps(h,hi);
+                for(int row=0;row<4;row++){
+                    unsigned packed=q4[(o+row)*rb+byte];
+                    if(l[row]!=(float)((int)(packed&15)-8)
+                       || h[row]!=(float)((int)(packed>>4)-8)){
+                        fprintf(stderr,"rows4 unpack: rb=%d o=%d byte=%d row=%d value=%u\n",
+                                rb,o,byte,row,packed);
+                        free(q4); return 1;
+                    }
+                }
+            }
+        }
+        free(q4);
+    }
+    printf("  rows4 unpack: all 256 byte values per lane, tight/strided rows ok\n");
+    return 0;
+}
+#endif
+
 int main(void){
     int fail=0;
     printf("test_i4_grouped: matmul_i4_grouped vs plain-C dequant reference\n");
+#if defined(__SSE4_1__) && !defined(__AVX2__)
+    fail|=check_rows4_unpack();
+#endif
 
     /* the shape the g64 checkpoints actually use */
     fail|=check("gs=64, I multiple of gs",            2, 512, 8, 64, 0);
@@ -240,6 +280,7 @@ int main(void){
 
     /* batch: S>1 exercises the per-s inner loop against a shared scale row */
     fail|=check("gs=64, batch S=8",                   8, 320, 6, 64, 0);
+    fail|=check("one-byte rows, odd I=1",             1,   1, 4, 2, 0);
 
 #ifdef COLI_HAVE_GROUPED_PAIR
     printf("test_i4_grouped: matmul_i4_grouped_pair (fused gate+up) vs two separate calls\n");
@@ -248,6 +289,7 @@ int main(void){
     fail|=check_pair("pair: gs=64, odd I (I=201)",     2, 201, 4, 64);
     fail|=check_pair("pair: gs=64, decode S=1",        1, 320, 6, 64);
     fail|=check_pair("pair: gs=128, I=512",            2, 512, 4, 128);
+    fail|=check_pair("pair: one-byte rows, odd I=1",   1,   1, 4, 2);
 #endif
 
     if(fail){ printf("test_i4_grouped: FAIL\n"); return 1; }
