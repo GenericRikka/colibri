@@ -20,7 +20,10 @@ import { useLocale } from "./i18n"
  * dare: l'ENTROPIA (quanto il modello sa di sapere) e i TOKEN GENERATI, zero. */
 
 const LEVEL = (h: number) => (h < 0.4 ? "sure" : h < 0.8 ? "unsure" : "unknown")
-const lines = (text: string) => text.split("\n").map((o) => o.trim()).filter(Boolean)
+/* Opzioni dedotte per riga, senza duplicati: il server rifiuta due opzioni
+ * uguali con un 400, e due chip con lo stesso testo darebbero una chiave React
+ * ripetuta e un remove che le toglie entrambe. Deduplicare qui le tre cose. */
+const lines = (text: string) => [...new Set(text.split("\n").map((o) => o.trim()).filter(Boolean))]
 
 interface Row {
   id: number
