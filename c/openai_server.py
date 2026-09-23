@@ -4526,7 +4526,18 @@ class APIHandler(BaseHTTPRequestHandler):
             # le domande (o tutte le caselle) condividono. Con un livello solo
             # la domanda si rilegge una volta per opzione; con due, 176 token
             # invece di 496 su quattro item (misurato).
-            if state_prefix and form != "options":
+            #
+            # Vale anche per la forma `options`: dentro una singola richiesta lo
+            # stato si legge comunque una volta (lo snapshot dello stato viene
+            # ripristinato quando `choose` fotografa il prefisso completo), ma
+            # il punto di ritorno sullo stato condiviso serve TRA richieste. La
+            # pagina web manda una domanda per richiesta sullo stesso documento;
+            # senza questa fotografia ogni domanda rifarebbe il prefill di tutto
+            # il documento, buttando via il "read once" che e' il senso della
+            # modalita. Con essa, ogni domanda successiva paga solo i propri
+            # token. Il costo e' uno snapshot in piu' su una richiesta one-shot,
+            # riusato o sfrattato.
+            if state_prefix:
                 n_state, _ = score(state_prefix, True)
                 prompt_max = max(prompt_max, n_state)
 
