@@ -5,7 +5,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [1.12.1] — 2026-09-22
 
-66 pull requests since v1.12.0, 54 of them from contributors. Two tokenizers
+69 pull requests since v1.12.0, 57 of them from contributors. Two tokenizers
 brought back to the reference, brio on the ninth engine, `coli chat` working
 again at the default context on two families, and a placement decision that
 is now measured on the card in front of it instead of predicted.
@@ -192,6 +192,20 @@ is now measured on the card in front of it instead of predicted.
   with zero errors and zero bytes leaked.
 - **#1669**: `test_systemone_api` imports its scoring engine relative to
   its package, so an installed `tests` package no longer breaks discovery.
+- **#1697** (kevin9327): the dashboard redesign had dropped the reasoning
+  stream: thinking tokens arrived on `delta.reasoning_content` and vanished,
+  the bubble stayed empty until the answer and a stop during thinking lost
+  the turn. The stream is read again, rendered as its own folding block,
+  counted in the rate and the time to first token, and a unit test pins the
+  split.
+- **#1693** (namespaceMarcello): with `PILOT` on, OLMoE could read the same
+  expert twice, once from the prefetcher and once from the forward pass,
+  into two slots; a slot being read now keeps a reservation in the index
+  (the `colibri.c` pattern) and the second caller waits for the first read
+  to publish. Three model-free scenarios pin it.
+- **#1695** (namespaceMarcello): the prefill echo state and `serve_echo` sit
+  under the same `QWEN36_NO_MAIN` guard, so the segment build no longer
+  warns about a function it never gets; the full build is byte-identical.
 - **#1622**: DeepSeek V4's REAP checkpoints store each expert as six
   per-matrix records; the engine read them through buffered pread and
   counted every one as a direct-I/O fallback (36% of expert reads on the
