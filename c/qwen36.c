@@ -359,6 +359,12 @@ static void load_tokenizer(const char *path){
             jval *t = adds->kids[k];
             const char *c = jstr(t,"content");
             int id = (int)jnum(t,"id");
+            /* Only the non-special ones: <think>, </think>, <tool_call>,
+             * <tool_response> are text the gateway parses. Special tokens
+             * (<|im_start|>, <|endoftext|>, ...) keep decoding to nothing,
+             * as reference decoding does with skip_special_tokens. */
+            jval *sp = json_get(t,"special");
+            if (sp && sp->t==J_BOOL && sp->boolean) continue;
             if (c && id>=0 && id<=mx && !g_tok[id])
                 g_tok[id]=strdup(c);
         }
