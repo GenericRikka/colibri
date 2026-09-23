@@ -5,7 +5,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [1.12.1] — 2026-09-22
 
-69 pull requests since v1.12.0, 57 of them from contributors. Two tokenizers
+70 pull requests since v1.12.0, 58 of them from contributors. Two tokenizers
 brought back to the reference, brio on the ninth engine, `coli chat` working
 again at the default context on two families, and a placement decision that
 is now measured on the card in front of it instead of predicted.
@@ -265,6 +265,14 @@ is now measured on the card in front of it instead of predicted.
   the documented teacher-forcing allowance; references are validated before
   the comparison and non-finite logits cannot pass. Both oracle CI jobs run
   real-process regressions against it.
+- **#1705**: `tools/benchmark_baseline.py`, a collection protocol on top of
+  the HTTP harness for a repeated three-engine serving baseline: one frozen
+  manifest (hardware, model and template identity, per-engine launch
+  settings, cache and speculation policy), a rotating plan over a
+  concurrency matrix, one collector per engine and round that manages no
+  server, and a comparison that keeps failed and missing cells visible and
+  distinguishes matched artifacts from deployment comparisons. No results
+  are bundled and no ranking is emitted.
 - **#1688**: `tools/benchmark_http_serving.py`, a stdlib HTTP streaming
   benchmark over fixed JSONL conversations: closed-loop or paced arrivals
   (periodic or Poisson, seeded), warmup separated from measurement,
