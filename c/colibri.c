@@ -4851,7 +4851,9 @@ static void attention_rows(Model *m, Layer *l, int layer, float *x, int S, int p
             float clat[512]; memset(clat,0,kvl*sizeof(float));
             if(exact_verify_on()&&g_spec_live&&!tq1&&!g_tq&&!g_kv8){
                 /* #689 exact verify: clat[i] = sum_t sc[t]*Lt[i] as an exact dot over t per column
-                 * (transposed walk: cache-unfriendly, verify rows only) */
+                 * (transposed walk: cache-unfriendly, verify rows only). NOT taken on the quantised
+                 * KV paths (tq1 / TQ / kv8): those keep the float context dot, so COLI_EXACT_VERIFY
+                 * does not provide exactness for the context dot with a quantised cache (README). */
                 for(int i=0;i<kvl;i++){ exd_acc ea; exd_init(&ea);
                     for(int jj=0;jj<nt;jj++){ int t = tlist ? tlist[jj] : st0+jj;
                         exd_add_ff(&ea,sc[jj],coli_kv_row(ks->Lc[layer],t,kvl)[i]); }
