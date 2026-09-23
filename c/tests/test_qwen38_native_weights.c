@@ -7,6 +7,7 @@
 #define COLI_SEGMENT_ADAPTER
 #include <pthread.h>
 #include "../qwen38.c"
+#include "../compat.h"   /* setenv: MinGW has none */
 
 #define CHECK(x) do { if(!(x)){ \
     fprintf(stderr,"%s:%d: check failed: %s\n",__FILE__,__LINE__,#x);return 1; \
@@ -422,8 +423,9 @@ static int check_parallel_fallback_reasons(const char *directory){
 
     if(init_fixture_model(&model,directory,1))return -1;
     model.expert_parallel_reads=1;
-    if(q38_expert_get_batch(&model,0,ids,Q38_MAX_TOPK+1,selected)||
-       model.expert_batch_fallback!=Q38_EXPERT_BATCH_FALLBACK_TOO_MANY){
+    /* a route wider than the per-layer cache (the #1686 shape: no top-k ceiling) */
+    if(q38_expert_get_batch(&model,0,ids,2,selected)||
+       model.expert_batch_fallback!=Q38_EXPERT_BATCH_FALLBACK_CACHE_CAPACITY){
         destroy_fixture_model(&model);return -1;
     }
     destroy_fixture_model(&model);
@@ -642,6 +644,9 @@ static int check_segment_failure_outputs(void){
 }
 
 int main(void){
+    /* this file pins storage and dispatch against the table kernel byte for
+     * byte; the vector FP8 kernel has its own tolerance test (test_qwen38_idot) */
+    setenv("Q38_FP8_KERNEL","scalar",1);
     enum { S=2, I=257, O=129 };
     Q38Weight fp8={0};q38_weight_reserve(&fp8,Q38_WEIGHT_FP8,O,I);
     CHECK(fp8.scale_count==6);CHECK(q38_weight_bytes(&fp8)==(uint64_t)O*I+6*sizeof(float));

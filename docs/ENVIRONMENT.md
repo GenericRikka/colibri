@@ -2,7 +2,7 @@
 
 Reference for the environment variables read by the colibrì engine.
 
-**Generated from `dev @ def8419`** by scanning every `getenv()` / `getenv_utf8()` site in `c/*.c`, `c/*.h`, `c/*.cu` and `c/*.mm`. Defaults and behavior are taken from the source; see [MAINTAINING-DOCS.md](MAINTAINING-DOCS.md) to regenerate this after the code changes.
+**Baseline generated from `dev @ def8419`** by scanning every `getenv()` / `getenv_utf8()` site in `c/*.c`, `c/*.h`, `c/*.cu` and `c/*.mm`. Individual entries are also maintained with their owning source. Defaults and behavior are taken from the source; see [MAINTAINING-DOCS.md](MAINTAINING-DOCS.md) to regenerate the full inventory after the code changes.
 
 ## Which program reads these?
 
@@ -16,7 +16,7 @@ what follows, but the sister engines read their own:
 | `kimi_k3` | `c/kimi_k3.c` | the `K3_*` family — see [Kimi K3 engine](#kimi-k3-engine-kimi_k3) |
 | `inkling` | `c/inkling.c` | `INK_*`, plus `CTX_MAX`, `PIN_N`, `REP_PEN`, `GPU_DEV`, `NOGPU` — see [Inkling engine](#inkling-engine-inkling) |
 | `qwen36` | `c/qwen36.c` | `QWEN_*`, `Q36_*`, its dense/CUDA-tier controls, and the `CACHE_ROUTE` family (VRAM tier over RAM cache) — see [Qwen3.6 engine](#qwen36-engine-qwen36) |
-| `qwen38` | `c/qwen38.c` | `Q38_MAXT`, `Q38_EOS`, `Q38_NATIVE_FP8`, `Q38_NATIVE_BF16`, `Q38_PREFILL_BATCH`, `COLI_TIMERS` — see [Qwen3.8 engine](#qwen38-engine-qwen38) |
+| `qwen38` | `c/qwen38.c` | `Q38_MAXT`, `Q38_EOS`, `Q38_NATIVE_FP8`, `Q38_NATIVE_BF16`, `Q38_PREFILL_BATCH`, `Q38_TRUNK_CPU_INT8`, `Q38_FP8_KERNEL`, `COLI_TIMERS` — see [Qwen3.8 engine](#qwen38-engine-qwen38) |
 | `olmoe` | `c/olmoe.c` | `HOT`, `WIDE`, `SMOOTH`, `CONF_LIMIT`, `MAX_NEW`, `CHAT`, `EXPERT_DROP`, `WARMUP` — see [OLMoE engine](#olmoe-engine-olmoe) |
 | `deepseek_v4` | `c/deepseek_v4.c` | `CTX`, the `V4_*` / `DSV4_*` families and the two `COLI_CUDA_*_BATCH` gates — see [DeepSeek V4 engine](#deepseek-v4-engine-deepseek_v4); note that the CUDA section below describes `colibri.c` knobs (`COLI_CUDA`, `CUDA_DENSE`, ...) which the V4 engine does not read — its GPU switch is `DSV4_CUDA` |
 
@@ -296,6 +296,8 @@ These are for testing, benchmarking, or internal use — not part of the everyda
 | `REF` / `REF_FORCE` | `ref_glm.json` | Reference-output comparison mode. |
 | `REPLAY` | unset | Replay mode. |
 | `TF` | unset | Teacher-forcing mode. |
+| `ORACLE_STRICT` | unset (off) | `colibri` only, env-only. `=1` makes failed teacher-forcing (`TF`) and greedy oracle comparisons exit with status 1. Token-exact by default; only TF can use the mismatch allowance below. Non-finite logits and incomplete generation always fail strict mode; modes that bypass comparison are rejected. Unset or `0` keeps completed comparisons report-only. Invalid reference JSON/arrays fail regardless of this setting. See [CONTRIBUTING.md](../CONTRIBUTING.md) for the strict oracle commands. |
+| `ORACLE_TF_MAX_MISMATCHES` | `0` | `colibri` only, env-only. Maximum token mismatches accepted with `ORACLE_STRICT=1` and `TF` set. Must be a nonnegative decimal integer smaller than the number of TF positions. CI uses `2` for the 32-position tiny fixture (30–32 matches); unset or `0` requires exact agreement. Mismatches remain visible in diagnostics. Ignored outside strict TF mode; cannot relax greedy comparison or non-finite-output checks. |
 | `CHAT_TEMPLATE` | `1` | Apply the GLM chat template (`0` = raw prompt). |
 | `PPL` | off (`olmoe.c` and `qwen38.c` only) | `PPL=1` enters teacher-forced NLL/perplexity meter mode in the OLMoE and Qwen3.8 sister engines. |
 | `ABLATE_SCORE` | unset | Causal-ablation sweep over `ABLATE_SCORE=<file>`, with a per-target-position final-logit read-out. Runs before `SCORE` and exits when done. |
@@ -391,6 +393,10 @@ and the CPU/GPU execution split.
 | Variable | Default | Effect |
 |---|---|---|
 | `COLI_DENSE_I8` | `1` (on) | Quantize resident dense matrices to per-row int8 at startup. `=0` keeps the f32 reference path for quality A/Bs. |
+| `COLI_DENSE_IDOT` | `1` (on) | The dense trunk's GEMVs (DeltaNet projections and out_proj, attention q/k/v/o, shared expert, lm_head) quantize the activation to int8 once per call and run integer dot products (maddubs on AVX2, vpdpbusd on AVX-VNNI / AVX-512 VNNI) instead of converting every int8 weight to f32. Not bit-identical to the f32 path; measured +1.0% perplexity, lm_head 12.6 to 10.2 ms/token. `=0` restores the f32-activation kernel. |
+| `QWEN_EXPERT_ACT` | `i8` | The routed experts' activation quantized to int8 once per row (expert_ffn.h mode 1). Measured +0.1% perplexity, expert compute 22.7 to 15.9 ms/token. `=f32` restores f32 activations and the bit-identical contract with the pair kernels. |
+| `COLI_DENSE_BITS` | `8` | `=4` stores the dense trunk as int4 in blocks of 64 with one scale per block (the K1b planar layout, half the bytes), served by the grouped integer kernel; implies the integer dot. Opt-in: on the 35B it costs +10% perplexity on the whole trunk, +2.4% on lm_head alone (see `COLI_DENSE_INT4`). |
+| `COLI_DENSE_INT4` | all components | With `COLI_DENSE_BITS=4`, a comma list of the components that take int4: `lmhead`, `dnproj`, `dnout`, `attn`, `shexp`, `router`. Measured on the 35B: `lmhead` +2.4% perplexity for 254 MB less per token; `lmhead,dnproj,dnout` +5.6%; everything +10%. |
 | `QWEN_EXPERT_KERNEL` | `1` (on) | Routed experts run through the shared `expert_ffn.h` kernel: the int4 stays packed in RAM (planar layout, half the expert-cache RSS of the int8 unpack), gate+up are one pass, and a layer is two OpenMP regions over (expert, row-chunk) items instead of 3 x top-k GEMV regions. Takes effect on an int4 gs=64 container whose hidden and expert widths are multiples of 64, and not under the CUDA expert tier. `=0` restores the unpack-to-int8 path; the two produce the same tokens (1024-token decode on the real container byte-identical; pinned on the tiny int4 fixture in CI), only the f32 accumulation order inside a dot differs. Measured at cap 256 on the real container: 12.8 -> 15.7 tok/s, peak RSS 29 -> 17 GB. |
 | `QWEN_DENSE_BATCH` | `1` (on) | On AVX2/FMA, reuse each dense-int8 weight decode across two prompt rows. `=0` restores one GEMV call per row. Decode `S=1` is unchanged. |
 | `QWEN_SHARED_BATCH` | bounded by 32 MiB scratch | Batch the CPU shared expert across prompt rows. `=0` restores scalar calls; a positive integer caps rows per chunk. The CUDA-tier overlap path is unchanged. |
@@ -408,6 +414,8 @@ checkpoint layout and the text-only capability boundary.
 | `Q38_NATIVE_FP8` | `1` (on) | Keep routed E4M3 expert bytes and their F32 128×128 block scales native in the LRU. `=0` restores expanded-FP32 slots for A/B validation. |
 | `Q38_NATIVE_BF16` | `1` (on) | Keep resident and routed BF16 matrices in two-byte storage while retaining FP32 activations/accumulation. `=0` restores the expanded-FP32 reference. |
 | `Q38_PREFILL_BATCH` | `1` (on) | Route prompt rows in bounded expert-major chunks and batch resident shared-expert/DeltaNet projections. `=0` restores row-at-a-time prompt execution for A/B diagnosis; decode is unchanged. |
+| `Q38_TRUNK_CPU_INT8` | `1` (on) | The dense trunk (DeltaNet and attention projections, hyper-connection mixers, shared expert, router, lm_head; every matrix of at least `Q38_TRUNK_MIN_KB`) is kept on the CPU as int8 rows with one scale per row and the BF16 copy is released; `q38_weight_matmul` quantizes the activation to int8 and uses the integer kernels of `idot.h` for decode and prefill. `=0` keeps the BF16 rows and the f32 kernel (the numeric reference). See [qwen38.md](qwen38.md#the-trunk-on-the-cpu-int8-rows). |
+| `Q38_FP8_KERNEL` | vector | The routed experts' e4m3 blocks are decoded eight at a time in registers and multiplied with FMA (AVX2 builds); `scalar` restores `quant.h`'s table kernel, which differs only by float summation order inside a block. |
 | `COLI_TIMERS` | `0` (off) | Set to `1` for the detailed Qwen3.8 phase breakdown on stderr. The shared per-request `PROF` frame is emitted regardless. |
 
 ## DeepSeek V4 engine (`deepseek_v4`)
@@ -465,6 +473,7 @@ These are read by the Python programs (not the `glm` engine), so they don't appe
 | `COLI_DEBUG` | `0` (off) | Tee the engine transaction to stderr, by level. **`1`** = decoded model output stream only (byte-by-byte, on both the tool-call and plain paths). **`2`** = both sides — the fully-rendered prompt the engine received *and* the output, bracketed and correlated by request id, so stderr reads as the whole conversation. Invaluable for seeing what the model received vs. emitted during an OpenCode session. |
 | `COLI_TOOL_SALVAGE` | `0` (off) | Opt-in de-mangler: reconstruct a malformed int4 tool call by mapping its lone payload onto the tool's primary parameter. Never rewrites well-formed output; recommended for int4 deployments. |
 | `COLI_THINK` | `0` (off) | Make thinking the default when the client sends *neither* `reasoning_effort` nor `enable_thinking`. Any explicit client value still wins. |
+| `COLI_CONTINUE_ASSISTANT` | `1` (on) | On the OpenAI- and Anthropic-compatible chat endpoints, continue a trailing `assistant` message — render its turn open and resume from it, dropping the turn terminator and the generation cue — instead of opening a new turn, the same contract as Anthropic's API. On by default: a message list ending in a non-empty `assistant` turn continues. Set `0` to restore the old behavior (append a fresh generation cue). Refused with `tools`/`tool_calls`, and the turn must carry text not ending in whitespace. Every shipped family supports it, Kimi K3 included (its open turn is framed engine-side in `kimi_k3.c`). Unrelated to `COLI_PREFILL_CHUNK`, which is the compute phase. |
 | `COLI_MODEL` | unset | Default model directory (fallback for `--model`). |
 | `COLI_MODEL_ID` | `glm-5.2-colibri` | Model id reported by the API. |
 | `COLI_API_KEY` | unset | Required bearer token for the server. |
