@@ -501,7 +501,9 @@ TEST_RULES  := $(shell sed -n 's|^tests/\(test_[a-z0-9_]*\)\$$(EXE):.*|\1|p' $(f
 # test_e8x4g64_loader takes a minted container directory on argv and prints its
 # usage (exit 2) without one, so it is a harness rather than a gate: it has a
 # rule here so it compiles under the suite's own $(CFLAGS) and its warnings are
-# caught, and tests/test_e8x4g64_mint_load.py is what actually drives it.
+# caught -- reachable via `make e8x4g64-loader-check`, kept out of `check` itself
+# since a bare invocation exits 2 -- and tests/test_e8x4g64_mint_load.py is what
+# actually drives it end to end.
 # test_qwen38_tier_engine drives qwen38.c over the generated FP8 fixture
 # (qwen38_tiny_fp8, gitignored); it runs from qwen38-tier-engine-check.
 TEST_EXCLUDE = test_uring test_deepseek_v4 test_v4_ownership test_v4_serve_framing \
@@ -1087,7 +1089,7 @@ fp8-bench: fp8_bench$(EXE)
 	./fp8_bench$(EXE)
 
 # Matched resident int8 GPU projection timings; run explicitly, not in CI.
-tests/bench_cuda_resident_batch$(EXE): tests/bench_cuda_resident_batch.cu backend_cuda.cu backend_cuda.h backend_gpu_compat.h
+tests/bench_cuda_resident_batch$(EXE): tests/bench_cuda_resident_batch.cu backend_cuda.cu backend_cuda.h fp8_format.h backend_gpu_compat.h
 	"$(GPUCC)" $(GPUFLAGS) backend_cuda.cu tests/bench_cuda_resident_batch.cu -o $@ $(ANS_NVCC_LIBS) $(GPU_TEST_LIBS)
 
 # NOCUDA_*: olmoe.c has no COLI_CUDA code at all, so CUDA=1 would otherwise
@@ -2109,6 +2111,14 @@ tests/test_shard_kvb_refuse$(EXE): tests/test_shard_kvb_refuse.c colibri.c st.h 
 tests/test_e8x4g64_loader$(EXE): tests/test_e8x4g64_loader.c st.h quant.h fp8_format.h compat.h
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
+# Reachable build-only entry point for the harness above: `make check` never
+# calls this (it stays out of TEST_BINS/test-c, per TEST_EXCLUDE), so this adds
+# no time to `check`. It exists so the suite's own $(CFLAGS) and warnings are
+# actually exercised on demand, the way qwen38-tier-engine-check does for
+# test_qwen38_tier_engine below.
+.PHONY: e8x4g64-loader-check
+e8x4g64-loader-check: tests/test_e8x4g64_loader$(EXE)
+
 test-c: $(TEST_BINS)
 	$(PYTHON) tools/run_tests.py $(TEST_BINS)
 
@@ -2247,5 +2257,5 @@ tests/test_kimi_request_state$(EXE): tests/test_kimi_request_state.c kimi_k3.c k
 	$(CC) $(NOCUDA_CFLAGS) tests/test_kimi_request_state.c $(VK_OBJ) -o tests/test_kimi_request_state$(EXE) $(NOCUDA_LDFLAGS)
 
 # Kimi CUDA dispatch/fallback with a fake backend; no CUDA toolkit required.
-tests/test_kimi_cuda_expert$(EXE): tests/test_kimi_cuda_expert.c kimi_k3.c backend_cuda.h kv_prefix.h serve_codec.h st.h json.h tok.h tok_unicode.h tok_unicode_o200k.h compat.h quant.h idot.h omp_tune.h route_trace.h
+tests/test_kimi_cuda_expert$(EXE): tests/test_kimi_cuda_expert.c kimi_k3.c backend_cuda.h kv_prefix.h serve_codec.h st.h json.h tok.h tok_unicode.h tok_unicode_o200k.h compat.h quant.h fp8_format.h idot.h omp_tune.h route_trace.h
 	$(CC) $(NOCUDA_CFLAGS) -DCOLI_CUDA $< $(VK_OBJ) -o $@ $(NOCUDA_LDFLAGS)

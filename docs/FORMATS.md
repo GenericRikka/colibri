@@ -94,12 +94,11 @@ fused path) — AND the other fused-bound tensors (`q_a`, `q_b`, `kv_a`, `o`,
 and on sparse layers `sh_gate`/`sh_up`/`sh_down`) sit on the fmt 1/2/3/4
 allowlist; any other format on any of those tensors makes the affected layers'
 decode take the CPU path instead, announced by a one-line-per-tensor-kind
-`[METAL]` stderr notice at load. Single source of truth (all anchors
-`c/colibri.c` at branch head `kvb/fmt-gate-notice-r4`): the shared per-layer
-predicate `metal_fused_layer_fmt_miss` (:3396, over the `metal_fused_fmt_ok`
-allowlist, :3379), consulted by both gate sites — `attention_rows` (:3448) and
-`layer_forward_rows` (:5792) — and by the load-time notice
-`metal_fmt_gate_notice` (:1866, called from `model_init`).
+`[METAL]` stderr notice at load. Single source of truth in `c/colibri.c`: the
+shared per-layer predicate `metal_fused_layer_fmt_miss`, over the
+`metal_fused_fmt_ok` allowlist, consulted by both gate sites —
+`attention_rows` and `layer_forward_rows` — and by the load-time notice
+`metal_fmt_gate_notice`, called from `model_init`.
 
 Sources for all rows (`c/quant.h`/`c/colibri.c` line numbers verified at
 this branch's own head -- originally written against base dev `292ed4c`,

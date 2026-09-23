@@ -390,12 +390,12 @@ static int expect_refuse_call(absorb_fn fn, const char *tag){
 #endif
 }
 
-/* fmt=8 block scales that cannot be multiplied through. A NaN scale poisons
- * every accumulator downstream of it; a ZERO scale emits an all-zero block,
- * which is the same output a decode against an unwritten table produces -- so
- * both are refused by name rather than propagated. One probe per value per
+/* A NaN fmt=8 block scale cannot be multiplied through: it poisons every
+ * accumulator downstream of it, so it is refused by name rather than
+ * propagated. (A ZERO scale is the opposite case -- valid data, not refused;
+ * see test_fmt8_zero_scale_decodes_to_zeros below.) One probe per value per
  * function; the scale is poisoned AFTER fill_fmt8 has built a valid tensor, so
- * the only thing under test is the new guard. */
+ * the only thing under test is the NaN guard. */
 static void poison_scale(QT *t, float v){ t->s[0]=v; }
 
 static void call_addrow_fmt8_nan(void){

@@ -931,7 +931,7 @@ def _print_inventory_summary(all_inv, dry_run):
 # number because it reads as a verification that was not performed.
 #   - config.json          colibri.c, cfg_root() -- fopen(...); if(!f){
 #     perror(p); exit(1); } -- MANDATORY, the run aborts without it. Also
-#     read by openai_server.py's Engine.__init__ (:2635) for arch detection.
+#     read by openai_server.py's Engine.__init__ for arch detection.
 #   - generation_config.json  colibri.c, cfg_root() -- fopen, comment "assente
 #     = nessun problema: e' opzionale" -- best-effort; HF's authority for
 #     generation defaults (extra EOS stop ids) when present.
