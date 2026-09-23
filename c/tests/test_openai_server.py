@@ -1479,6 +1479,101 @@ class DispatcherTest(unittest.TestCase):
         self.assertEqual(process.writes[-1].split(), [b"STOP", request_id])
 
 
+def _capture_frames(body, path="/v1/completions"):
+    """Sends `body` to `path` against a FakeProcess-backed Engine/APIServer
+    and returns (status, parsed_response, frames_written_to_the_engine).
+    Shared by the test classes below so the harness lives in one place.
+    """
+    frames = []
+
+    def respond(process, frame):
+        frames.append(frame)
+        rid = frame.split()[1]
+        process.stdout.feed(b"DATA " + rid + b" 5\nHello\n")
+        process.stdout.feed(b"DONE " + rid + b" STAT 1 2.5 0 1.0 4 0\n")
+
+    process = FakeProcess(respond)
+    with patch("openai_server.subprocess.Popen", return_value=process):
+        engine = Engine("glm", "model")
+    server = APIServer(("127.0.0.1", 0), engine, "test-model", "secret", 16)
+    thread = threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True)
+    thread.start()
+    try:
+        data = json.dumps(body).encode()
+        headers = {"Authorization": "Bearer secret", "Content-Type": "application/json"}
+        request = Request(f"http://127.0.0.1:{server.server_port}{path}",
+                          data=data, headers=headers)
+        with urlopen(request, timeout=2) as response:
+            status = response.status
+            parsed = json.load(response)
+    finally:
+        server.scheduler.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        engine.close()
+    return status, parsed, frames
+
+
+class BaseWireContractTest(unittest.TestCase):
+    """Pins the SUBMIT frame written for a request that uses none of the
+    optional fields; any change here is a wire-format change and must be
+    deliberate.
+    """
+
+    def test_no_new_fields_request_emits_the_base_submit_header(self):
+        _, _, frames = _capture_frames(
+            {"model": "test-model", "prompt": "Complete me", "temperature": 0, "max_tokens": 4})
+        self.assertEqual(frames, [b"SUBMIT 1 0 11 4 0 0.9\nComplete me\n"])
+
+
+class SeedOptionTest(unittest.TestCase):
+    """`generation_options()` accepts a `seed` field without raising."""
+
+    def test_seed_is_accepted_by_generation_options(self):
+        generation_options({"seed": 1234, "prompt": "hi"}, 16)   # must not raise
+
+
+class SeedWireFrameTest(unittest.TestCase):
+    """`seed` is accepted and ignored. A stub-response equality check alone
+    is vacuous here (the scripted `respond` closure inside `_capture_frames`
+    always returns the same canned text regardless of any request field) --
+    the real proof is that the byte-exact SUBMIT frames the dispatcher
+    writes to the engine process (see DispatcherTest above) never carry the
+    seed value at all, seeded or not.
+    """
+
+    def test_seed_accepted_and_absent_from_submit_frame(self):
+        base = {"model": "test-model", "prompt": "Complete me", "temperature": 0, "max_tokens": 4}
+        status_plain, body_plain, frames_plain = _capture_frames(base)
+        status_seeded, body_seeded, frames_seeded = _capture_frames({**base, "seed": 1234})
+        self.assertEqual(status_plain, 200)
+        self.assertEqual(status_seeded, 200)
+        self.assertEqual(body_seeded["choices"][0], body_plain["choices"][0])
+        # Each call uses a freshly-constructed Engine, so both first requests are
+        # assigned request id "1" -- the wire frames are directly byte-comparable,
+        # no field needs normalizing. Comparing the whole frame list (not just
+        # the first frame) closes "reaches no wire frame" literally: if `seed`
+        # ever leaked onto any frame, this equality would break.
+        self.assertEqual(frames_seeded, frames_plain)
+
+    def test_seed_accepted_and_absent_from_chat_submit_frame(self):
+        # Same proof as above, on /v1/chat/completions: generation_options()
+        # is shared by both endpoints, but the SUBMIT frame is built from
+        # the chat-rendered prompt, so this is not implied by the completions
+        # case above -- a divergence between the two call sites would only
+        # show up here.
+        base = {"model": "test-model", "messages": [{"role": "user", "content": "Hi"}],
+                "temperature": 0, "max_tokens": 4}
+        status_plain, body_plain, frames_plain = _capture_frames(base, path="/v1/chat/completions")
+        status_seeded, body_seeded, frames_seeded = _capture_frames(
+            {**base, "seed": 1234}, path="/v1/chat/completions")
+        self.assertEqual(status_plain, 200)
+        self.assertEqual(status_seeded, 200)
+        self.assertEqual(body_seeded["choices"][0], body_plain["choices"][0])
+        self.assertEqual(frames_seeded, frames_plain)
+
+
 class CapSentinelShimTest(unittest.TestCase):
     # #379 cap-sentinel shim, arch-keyed (#386 r2, F3): an absent cap is
     # "platform-auto" only for the glm engine (colibri.c coli_resolve_cap);

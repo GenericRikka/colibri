@@ -3087,8 +3087,8 @@ def generation_options(body, limit):
         raise APIError(400, "Log probabilities are not supported yet.", "logprobs", "unsupported_parameter")
     if body.get("frequency_penalty", 0) or body.get("presence_penalty", 0):
         raise APIError(400, "Token penalties are not supported yet.", None, "unsupported_parameter")
-    if body.get("seed") is not None:
-        raise APIError(400, "Per-request seeds are not supported yet.", "seed", "unsupported_parameter")
+    # `seed` is accepted for request-shape compatibility and silently discarded:
+    # this server puts no per-request seed on the wire, at any temperature.
     # response_format -> optional per-request grammar for the engine's grammar-forced
     # draft source (#70/#148). NEVER a sampling constraint: drafts are verified, so a
     # schema the engine cannot compile degrades to "no speedup", not to an error and
