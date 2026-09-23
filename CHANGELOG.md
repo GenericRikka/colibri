@@ -5,7 +5,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [1.12.1] — 2026-09-22
 
-65 pull requests since v1.12.0, 53 of them from contributors. Two tokenizers
+70 pull requests since v1.12.0, 58 of them from contributors. Two tokenizers
 brought back to the reference, brio on the ninth engine, `coli chat` working
 again at the default context on two families, and a placement decision that
 is now measured on the card in front of it instead of predicted.
@@ -192,6 +192,20 @@ is now measured on the card in front of it instead of predicted.
   with zero errors and zero bytes leaked.
 - **#1669**: `test_systemone_api` imports its scoring engine relative to
   its package, so an installed `tests` package no longer breaks discovery.
+- **#1697** (kevin9327): the dashboard redesign had dropped the reasoning
+  stream: thinking tokens arrived on `delta.reasoning_content` and vanished,
+  the bubble stayed empty until the answer and a stop during thinking lost
+  the turn. The stream is read again, rendered as its own folding block,
+  counted in the rate and the time to first token, and a unit test pins the
+  split.
+- **#1693** (namespaceMarcello): with `PILOT` on, OLMoE could read the same
+  expert twice, once from the prefetcher and once from the forward pass,
+  into two slots; a slot being read now keeps a reservation in the index
+  (the `colibri.c` pattern) and the second caller waits for the first read
+  to publish. Three model-free scenarios pin it.
+- **#1695** (namespaceMarcello): the prefill echo state and `serve_echo` sit
+  under the same `QWEN36_NO_MAIN` guard, so the segment build no longer
+  warns about a function it never gets; the full build is byte-identical.
 - **#1622**: DeepSeek V4's REAP checkpoints store each expert as six
   per-matrix records; the engine read them through buffered pread and
   counted every one as a direct-I/O fallback (36% of expert reads on the
@@ -238,11 +252,27 @@ is now measured on the card in front of it instead of predicted.
   dependency. The admission scheduler distinguishes completion, failure
   and cancellation, lets a request use a free slot that no earlier waiter
   reserved, and joins the keepalive pump before the slot is released.
+- **#1402** (enitimeago): a request whose last message is a non-empty
+  `assistant` turn continues that turn instead of answering in a new one, on
+  `/v1/chat/completions` and `/v1/messages`, for all nine families (Kimi K3
+  frames the open turn engine-side); the prompt ends inside the turn as the
+  official template renders it without a generation cue. On by default,
+  `COLI_CONTINUE_ASSISTANT=0` restores the old behaviour; refused together
+  with tools or a turn ending in whitespace, with a 400 that says why. Each
+  renderer is pinned against the vendored template (#1401).
 - **#1605**: `ORACLE_STRICT=1` makes a GLM oracle comparison exit non-zero
   when it fails, token-exact by default with `ORACLE_TF_MAX_MISMATCHES` for
   the documented teacher-forcing allowance; references are validated before
   the comparison and non-finite logits cannot pass. Both oracle CI jobs run
   real-process regressions against it.
+- **#1705**: `tools/benchmark_baseline.py`, a collection protocol on top of
+  the HTTP harness for a repeated three-engine serving baseline: one frozen
+  manifest (hardware, model and template identity, per-engine launch
+  settings, cache and speculation policy), a rotating plan over a
+  concurrency matrix, one collector per engine and round that manages no
+  server, and a comparison that keeps failed and missing cells visible and
+  distinguishes matched artifacts from deployment comparisons. No results
+  are bundled and no ranking is emitted.
 - **#1688**: `tools/benchmark_http_serving.py`, a stdlib HTTP streaming
   benchmark over fixed JSONL conversations: closed-loop or paced arrivals
   (periodic or Poisson, seeded), warmup separated from measurement,
