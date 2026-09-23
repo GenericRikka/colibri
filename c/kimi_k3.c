@@ -533,6 +533,13 @@ static int g_k3_mmap=0;                  /* prepared U8/F32 tensors stay file-ba
 static uint64_t g_k3_mmap_bytes=0, g_k3_mmap_views=0;
 #ifdef COLI_CUDA
 static int g_k3_cuda=0;                  /* K3_CUDA=1: MXFP4 routed experts on CUDA at decode */
+/* K3_CUDA is the explicit override. COLI_CUDA is what `coli --gpu` writes. */
+static int k3_cuda_requested(void){
+    const char *e=getenv("K3_CUDA");
+    if(e && *e) return atoi(e);
+    e=getenv("COLI_CUDA");
+    return e ? atoi(e) : 0;
+}
 #endif
 static int g_k3_direct=-1;               /* K3_DIRECT: O_DIRECT expert reads */
 static int g_k3_idot=1;                  /* K3_IDOT: int8-activation expert matmuls */
@@ -840,7 +847,7 @@ static void model_init_range(Model *m, const char *snap, int layer_begin,
         { const char *ev=getenv("K3_VK"); vk_requested=!ev||atoi(ev); }
 #endif
 #ifdef COLI_CUDA
-        cuda_requested=getenv("K3_CUDA")&&atoi(getenv("K3_CUDA"));
+        cuda_requested=k3_cuda_requested();
 #endif
         if(!k3_mmap_backend_allowed(1,vk_requested,cuda_requested)){
             fprintf(stderr,"K3_MMAP=1 is CPU-only; set K3_VK=0 and K3_CUDA=0 -- refusing before model load\n");
@@ -849,7 +856,7 @@ static void model_init_range(Model *m, const char *snap, int layer_begin,
         fprintf(stderr,"[K3-MMAP] prepared tensor mapping enabled (CPU-only, no conversion fallback)\n");
     }
 #ifdef COLI_CUDA
-    g_k3_cuda = getenv("K3_CUDA") ? atoi(getenv("K3_CUDA")) : 0;
+    g_k3_cuda = k3_cuda_requested();
     if(g_k3_cuda){
         int dev0 = 0;
         if(!coli_cuda_init(&dev0, 1)){
